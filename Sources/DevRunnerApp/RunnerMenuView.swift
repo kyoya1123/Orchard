@@ -18,7 +18,6 @@ struct RunnerMenuView: View {
                 if model.configuredDirectoryPaths.isEmpty {
                     emptyDirectoriesView
                 } else {
-                    context
                     controls
                     jobsView
                     logView
@@ -31,18 +30,6 @@ struct RunnerMenuView: View {
         }
         .onChange(of: model.selectedWorktreeID) { _, _ in
             Task { await model.worktreeSelectionChanged() }
-        }
-        .alert(item: $model.destinationConflictAlert) { alert in
-            Alert(
-                title: Text("Destination is already running"),
-                message: Text("\(alert.destinationName) is currently used by \(alert.existingJobTitle). Stop it and start the new run?"),
-                primaryButton: .destructive(Text("Stop Previous & Run")) {
-                    model.confirmReplaceDestinationRun()
-                },
-                secondaryButton: .cancel {
-                    model.cancelReplaceDestinationRun()
-                }
-            )
         }
     }
 
@@ -84,23 +71,12 @@ struct RunnerMenuView: View {
         }
     }
 
-    private var context: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Directory", value: model.selectedWorktree?.worktreeURL.path ?? "Not resolved")
-            LabeledContent("Branch", value: model.selectedWorktree?.branchName ?? "Not resolved")
-            LabeledContent("Project", value: model.project?.displayName ?? "Not found")
-            LabeledContent("Status", value: model.status)
-        }
-        .font(.caption)
-        .textSelection(.enabled)
-    }
-
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
             Picker("Project", selection: $model.selectedWorktreeID) {
                 Text("Select").tag(String?.none)
                 ForEach(model.worktrees) { worktree in
-                    Text("\(worktree.displayName) — \(worktree.detail)")
+                    Text(worktree.displayName)
                         .tag(Optional(worktree.id))
                 }
             }
@@ -126,13 +102,6 @@ struct RunnerMenuView: View {
                     Label("Build & Run", systemImage: "play.fill")
                 }
                 .disabled(!model.canBuildAndRun)
-
-                Button {
-                    model.stopSelectedJob()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .disabled(!model.canStopSelectedJob)
             }
         }
     }
@@ -194,9 +163,70 @@ struct RunnerMenuView: View {
     private var jobsView: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !model.jobs.isEmpty {
-                Picker("Run", selection: $model.selectedJobID) {
-                    ForEach(model.jobs) { job in
-                        Text(job.displayName).tag(Optional(job.id))
+                HStack {
+                    Text("Runs")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        model.stopSelectedJob()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!model.canStopSelectedJob)
+                    .help("Stop")
+
+                    Button {
+                        model.rerunSelectedJob()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!model.canRerunSelectedJob)
+                    .help("Rerun")
+
+                    Button {
+                        model.closeSelectedJob()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!model.canCloseSelectedJob)
+                    .help("Close")
+                }
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(model.jobs) { job in
+                            Button {
+                                model.selectedJobID = job.id
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(job.tabTitle)
+                                        .font(.caption)
+                                        .lineLimit(1)
+
+                                    Text(job.worktreeDisplayName)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .frame(width: 172, alignment: .leading)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(tabBackground(for: job))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .stroke(tabBorderColor(for: job), lineWidth: 1)
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                            }
+                            .buttonStyle(.plain)
+                            .help(job.displayName)
+                        }
                     }
                 }
             }
@@ -242,6 +272,22 @@ struct RunnerMenuView: View {
     private func copyLogToPasteboard() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(model.logText, forType: .string)
+    }
+
+    private func tabBackground(for job: RunJob) -> Color {
+        if model.selectedJob?.id == job.id {
+            return Color.accentColor.opacity(0.18)
+        }
+
+        return Color(nsColor: .controlBackgroundColor)
+    }
+
+    private func tabBorderColor(for job: RunJob) -> Color {
+        if model.selectedJob?.id == job.id {
+            return Color.accentColor.opacity(0.75)
+        }
+
+        return Color(nsColor: .separatorColor)
     }
 
     private func selectDirectory() {

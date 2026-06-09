@@ -42,13 +42,23 @@ struct RunJob: Identifiable {
     var isRunning: Bool {
         status == .running
     }
-}
 
-struct DestinationConflictAlert: Identifiable {
-    let id = UUID()
-    let existingJobID: UUID
-    let destinationName: String
-    let existingJobTitle: String
+    var statusIcon: String {
+        switch status {
+        case .running:
+            "●"
+        case .completed:
+            "✓"
+        case .failed:
+            "!"
+        case .stopped:
+            "■"
+        }
+    }
+
+    var tabTitle: String {
+        "\(statusIcon) \(destination.name) · \(scheme)"
+    }
 }
 
 @MainActor
@@ -63,9 +73,9 @@ final class RunnerViewModel: ObservableObject {
     @Published var status = "Idle"
     @Published var jobs: [RunJob] = []
     @Published var selectedJobID: UUID?
-    @Published var destinationConflictAlert: DestinationConflictAlert?
 
     private struct RunRequest {
+        let replacingJobID: UUID?
         let worktreeDisplayName: String
         let project: XcodeProject
         let scheme: String
@@ -76,7 +86,6 @@ final class RunnerViewModel: ObservableObject {
     private let worktreeContextResolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
     private var runServices: [UUID: BuildRunService] = [:]
-    private var pendingRunRequest: RunRequest?
 
     init() {
         configuredDirectoryPaths = UserDefaults.standard.stringArray(forKey: configuredDirectoryPathsKey) ?? []
@@ -92,6 +101,14 @@ final class RunnerViewModel: ObservableObject {
 
     var canStopSelectedJob: Bool {
         selectedJob.map(\.isRunning) ?? false
+    }
+
+    var canRerunSelectedJob: Bool {
+        selectedJob != nil
+    }
+
+    var canCloseSelectedJob: Bool {
+        selectedJob != nil
     }
 
     var selectedWorktree: WorktreeContext? {
@@ -180,48 +197,53 @@ final class RunnerViewModel: ObservableObject {
         guard let selectedWorktree, let selectedScheme, let selectedDestination else { return }
 
         let request = RunRequest(
+            replacingJobID: nil,
             worktreeDisplayName: selectedWorktree.displayName,
             project: selectedWorktree.project,
             scheme: selectedScheme,
             destination: selectedDestination
         )
 
-        if let existingJob = jobs.first(where: { $0.isRunning && $0.destination.id == selectedDestination.id }) {
-            pendingRunRequest = request
-            destinationConflictAlert = DestinationConflictAlert(
-                existingJobID: existingJob.id,
-                destinationName: existingJob.destination.displayName,
-                existingJobTitle: existingJob.title
-            )
-            return
+        Task {
+            await startRunReplacingDestination(request)
         }
-
-        startRun(request)
     }
 
-    func confirmReplaceDestinationRun() {
-        guard let pendingRunRequest,
-              let alert = destinationConflictAlert else {
-            return
-        }
+    func rerunSelectedJob() {
+        guard let selectedJob else { return }
 
-        self.pendingRunRequest = nil
-        destinationConflictAlert = nil
+        let request = RunRequest(
+            replacingJobID: selectedJob.id,
+            worktreeDisplayName: selectedJob.worktreeDisplayName,
+            project: selectedJob.project,
+            scheme: selectedJob.scheme,
+            destination: selectedJob.destination
+        )
 
         Task {
-            await stop(jobID: alert.existingJobID)
-            startRun(pendingRunRequest)
+            if selectedJob.isRunning {
+                await stop(jobID: selectedJob.id)
+            }
+            await startRunReplacingDestination(request)
         }
-    }
-
-    func cancelReplaceDestinationRun() {
-        pendingRunRequest = nil
-        destinationConflictAlert = nil
     }
 
     func stopSelectedJob() {
         guard let selectedJob else { return }
         Task { await stop(jobID: selectedJob.id) }
+    }
+
+    func closeSelectedJob() {
+        guard let selectedJob else { return }
+
+        if selectedJob.isRunning {
+            Task {
+                await stop(jobID: selectedJob.id)
+                removeJob(jobID: selectedJob.id)
+            }
+        } else {
+            removeJob(jobID: selectedJob.id)
+        }
     }
 
     func clearLog() {
@@ -246,20 +268,25 @@ final class RunnerViewModel: ObservableObject {
     }
 
     private func startRun(_ request: RunRequest) {
-        let jobID = UUID()
-        let job = RunJob(
-            id: jobID,
-            worktreeDisplayName: request.worktreeDisplayName,
-            project: request.project,
-            scheme: request.scheme,
-            destination: request.destination,
-            startedAt: Date(),
-            status: .running,
-            logText: "\n=== Build & Run: \(request.worktreeDisplayName), \(request.scheme) on \(request.destination.displayName) ===\n"
-        )
+        let jobID = request.replacingJobID ?? UUID()
 
         let service = BuildRunService()
-        jobs.append(job)
+        if let index = jobs.firstIndex(where: { $0.id == jobID }) {
+            jobs[index].status = .running
+            jobs[index].logText = ""
+        } else {
+            let job = RunJob(
+                id: jobID,
+                worktreeDisplayName: request.worktreeDisplayName,
+                project: request.project,
+                scheme: request.scheme,
+                destination: request.destination,
+                startedAt: Date(),
+                status: .running,
+                logText: ""
+            )
+            jobs.append(job)
+        }
         selectedJobID = jobID
         runServices[jobID] = service
         status = "Running"
@@ -276,14 +303,32 @@ final class RunnerViewModel: ObservableObject {
                     }
                 }
 
-                appendLog("\nLaunched. Use Stop to terminate the app.\n", to: jobID)
+                if jobs.first(where: { $0.id == jobID })?.status == .running {
+                    finish(jobID: jobID, status: .completed, message: "")
+                }
             } catch {
                 let currentStatus = jobs.first { $0.id == jobID }?.status
                 if currentStatus != .stopped {
-                    finish(jobID: jobID, status: .failed, message: "\nFailed: \(error.localizedDescription)\n")
+                    finish(jobID: jobID, status: .failed, message: "")
                 }
             }
         }
+    }
+
+    private func startRunReplacingDestination(_ request: RunRequest) async {
+        let replacingJobID = request.replacingJobID
+        let replacedJobs = jobs.filter {
+            $0.destination.id == request.destination.id && $0.id != replacingJobID
+        }
+
+        for job in replacedJobs {
+            if job.isRunning {
+                await stop(jobID: job.id)
+            }
+            removeJob(jobID: job.id)
+        }
+
+        startRun(request)
     }
 
     private func stop(jobID: UUID) async {
@@ -292,21 +337,33 @@ final class RunnerViewModel: ObservableObject {
             return
         }
 
-        await service.stopCompletely(destination: job.destination) { [weak self] text in
-            Task { @MainActor in
-                self?.appendLog(text, to: jobID)
-            }
+        if let index = jobs.firstIndex(where: { $0.id == jobID }) {
+            jobs[index].status = .stopped
+            status = jobs.contains { $0.isRunning } ? "Running" : RunJobStatus.stopped.label
         }
-        finish(jobID: jobID, status: .stopped, message: "\nStopped.\n")
+
+        await service.stopCompletely(destination: job.destination) { _ in }
+        runServices[jobID] = nil
     }
 
     private func finish(jobID: UUID, status: RunJobStatus, message: String) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
 
         jobs[index].status = status
-        appendLog(message, to: jobID)
+        if !message.isEmpty {
+            appendLog(message, to: jobID)
+        }
         runServices[jobID] = nil
         self.status = jobs.contains { $0.isRunning } ? "Running" : status.label
+    }
+
+    private func removeJob(jobID: UUID) {
+        jobs.removeAll { $0.id == jobID }
+        runServices[jobID] = nil
+
+        if selectedJobID == jobID {
+            selectedJobID = jobs.last?.id
+        }
     }
 
     private func appendLogToSelectedJob(_ text: String) {

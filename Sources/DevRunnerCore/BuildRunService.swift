@@ -4,12 +4,14 @@ public final class BuildRunService: @unchecked Sendable {
     private let processRunner: ProcessRunner
     private var runningProcess: Process?
     private var launchedApp: RunnableApp?
+    private var isStopping = false
 
     public init(processRunner: ProcessRunner = ProcessRunner()) {
         self.processRunner = processRunner
     }
 
     public func stop() {
+        isStopping = true
         runningProcess?.terminate()
         runningProcess = nil
     }
@@ -41,7 +43,7 @@ public final class BuildRunService: @unchecked Sendable {
         project: XcodeProject,
         scheme: String,
         destination: XcodeDestination,
-        log: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
         let derivedDataURL = FileManager.default
             .temporaryDirectory
@@ -60,12 +62,11 @@ public final class BuildRunService: @unchecked Sendable {
             "build"
         ]
 
-        log("$ xcodebuild \(buildArguments.joined(separator: " "))\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             arguments: buildArguments,
             currentDirectoryURL: project.rootURL,
-            log: log
+            log: { _ in }
         )
 
         let settings = try await XcodeService().buildSettings(
@@ -82,69 +83,82 @@ public final class BuildRunService: @unchecked Sendable {
 
         switch destination.kind {
         case .device:
-            try await installAndLaunchOnDevice(app: app, destination: destination, log: log)
+            try await installAndLaunchOnDevice(app: app, destination: destination, consoleLog: consoleLog)
         case .simulator:
-            try await installAndLaunchOnSimulator(app: app, destination: destination, log: log)
+            try await installAndLaunchOnSimulator(app: app, destination: destination, consoleLog: consoleLog)
         }
     }
 
     private func installAndLaunchOnSimulator(
         app: RunnableApp,
         destination: XcodeDestination,
-        log: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
-        log("\n$ xcrun simctl boot \(destination.id)\n")
         _ = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "boot", destination.id],
             currentDirectoryURL: nil
         )
 
-        log("$ xcrun simctl install \(destination.id) \(app.appURL.path)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "install", destination.id, app.appURL.path],
             currentDirectoryURL: nil,
-            log: log
+            log: { _ in }
         )
 
-        log("$ xcrun simctl launch \(destination.id) \(app.bundleIdentifier)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: ["simctl", "launch", destination.id, app.bundleIdentifier],
+            arguments: [
+                "simctl",
+                "launch",
+                "--terminate-running-process",
+                "--console",
+                destination.id,
+                app.bundleIdentifier
+            ],
             currentDirectoryURL: nil,
-            log: log
+            log: consoleLog
         )
     }
 
     private func installAndLaunchOnDevice(
         app: RunnableApp,
         destination: XcodeDestination,
-        log: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
-        log("\n$ xcrun devicectl device install app --device \(destination.id) \(app.appURL.path)\n")
-        try await runStreaming(
-            executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: ["devicectl", "device", "install", "app", "--device", destination.id, app.appURL.path],
-            currentDirectoryURL: nil,
-            log: log
-        )
-
-        log("$ xcrun devicectl device process launch --device \(destination.id) --terminate-existing \(app.bundleIdentifier)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: [
                 "devicectl",
                 "device",
+                "--quiet",
+                "install",
+                "app",
+                "--device",
+                destination.id,
+                app.appURL.path
+            ],
+            currentDirectoryURL: nil,
+            log: { _ in }
+        )
+
+        try await runStreaming(
+            executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: [
+                "devicectl",
+                "device",
+                "--quiet",
                 "process",
                 "launch",
                 "--device",
                 destination.id,
                 "--terminate-existing",
+                "--console",
                 app.bundleIdentifier
             ],
             currentDirectoryURL: nil,
-            log: log
+            log: consoleLog
         )
     }
 
@@ -153,12 +167,11 @@ public final class BuildRunService: @unchecked Sendable {
         destination: XcodeDestination,
         log: @Sendable @escaping (String) -> Void
     ) async throws {
-        log("\n$ xcrun simctl terminate \(destination.id) \(app.bundleIdentifier)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "terminate", destination.id, app.bundleIdentifier],
             currentDirectoryURL: nil,
-            log: log
+            log: { _ in }
         )
     }
 
@@ -177,17 +190,16 @@ public final class BuildRunService: @unchecked Sendable {
         )
 
         if processIDs.isEmpty {
-            log("\nNo running process found for \(app.bundleIdentifier).\n")
             return
         }
 
         for processID in processIDs {
-            log("\n$ xcrun devicectl device process terminate --device \(destination.id) --pid \(processID)\n")
             try await runStreaming(
                 executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
                 arguments: [
                     "devicectl",
                     "device",
+                    "--quiet",
                     "process",
                     "terminate",
                     "--device",
@@ -196,7 +208,7 @@ public final class BuildRunService: @unchecked Sendable {
                     String(processID)
                 ],
                 currentDirectoryURL: nil,
-                log: log
+                log: { _ in }
             )
         }
     }
@@ -306,9 +318,11 @@ public final class BuildRunService: @unchecked Sendable {
             process.terminationHandler = { [weak self] process in
                 outputPipe.fileHandleForReading.readabilityHandler = nil
                 errorPipe.fileHandleForReading.readabilityHandler = nil
+                let stopped = self?.isStopping == true
                 self?.runningProcess = nil
+                self?.isStopping = false
 
-                if process.terminationStatus == 0 {
+                if process.terminationStatus == 0 || stopped {
                     continuation.resume()
                 } else {
                     continuation.resume(
