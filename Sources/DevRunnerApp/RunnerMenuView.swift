@@ -19,6 +19,7 @@ struct RunnerMenuView: View {
                     emptyDirectoriesView
                 } else {
                     controls
+                    Divider()
                     jobsView
                     logView
                 }
@@ -76,7 +77,7 @@ struct RunnerMenuView: View {
             Picker("Project", selection: $model.selectedWorktreeID) {
                 Text("Select").tag(String?.none)
                 ForEach(model.worktrees) { worktree in
-                    Text(worktree.displayName)
+                    Text(worktree.branchName)
                         .tag(Optional(worktree.id))
                 }
             }
@@ -88,12 +89,7 @@ struct RunnerMenuView: View {
                 }
             }
 
-            Picker("Destination", selection: $model.selectedDestinationID) {
-                Text("Select").tag(String?.none)
-                ForEach(model.destinations) { destination in
-                    Text(destination.displayName).tag(Optional(destination.id))
-                }
-            }
+            destinationMenu
 
             HStack {
                 Button {
@@ -103,6 +99,86 @@ struct RunnerMenuView: View {
                 }
                 .disabled(!model.canBuildAndRun)
             }
+        }
+    }
+
+    private var destinationMenu: some View {
+        HStack {
+            Text("Destination")
+                .frame(width: 76, alignment: .leading)
+
+            Menu {
+                if !model.deviceDestinations.isEmpty {
+                    Section("Devices") {
+                        ForEach(model.deviceDestinations) { destination in
+                            destinationButton(destination, systemImage: "iphone")
+                        }
+                    }
+                }
+
+                if !model.favoriteSimulatorDestinations.isEmpty {
+                    Section("Favorite Simulators") {
+                        ForEach(model.favoriteSimulatorDestinations) { destination in
+                            destinationButton(destination, systemImage: "star.fill")
+                        }
+                    }
+                }
+
+                if model.showsAllSimulators && !model.otherSimulatorDestinations.isEmpty {
+                    Section("More Simulators") {
+                        ForEach(model.otherSimulatorDestinations) { destination in
+                            destinationButton(destination, systemImage: "macwindow")
+                        }
+                    }
+                }
+
+                if model.hiddenSimulatorCount > 0 || model.showsAllSimulators {
+                    Divider()
+
+                    Button {
+                        model.toggleShowsAllSimulators()
+                    } label: {
+                        Label(
+                            model.showsAllSimulators ? "Show Less Simulators" : "Show More Simulators",
+                            systemImage: model.showsAllSimulators ? "chevron.up" : "chevron.down"
+                        )
+                    }
+                }
+
+                if model.canToggleSelectedSimulatorFavorite {
+                    Divider()
+
+                    Button {
+                        model.toggleSelectedSimulatorFavorite()
+                    } label: {
+                        Label(
+                            model.selectedSimulatorIsFavorite ? "Unfavorite Selected Simulator" : "Favorite Selected Simulator",
+                            systemImage: model.selectedSimulatorIsFavorite ? "star.slash" : "star"
+                        )
+                    }
+                }
+            } label: {
+                HStack {
+                    Text(model.selectedDestinationTitle)
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private func destinationButton(_ destination: XcodeDestination, systemImage: String) -> some View {
+        Button {
+            model.selectDestination(destination.id)
+        } label: {
+            Label(
+                destination.displayName,
+                systemImage: model.selectedDestinationID == destination.id ? "checkmark" : systemImage
+            )
         }
     }
 
@@ -169,67 +245,135 @@ struct RunnerMenuView: View {
                         .foregroundStyle(.secondary)
 
                     Spacer()
-
-                    Button {
-                        model.stopSelectedJob()
-                    } label: {
-                        Image(systemName: "stop.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!model.canStopSelectedJob)
-                    .help("Stop")
-
-                    Button {
-                        model.rerunSelectedJob()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!model.canRerunSelectedJob)
-                    .help("Rerun")
-
-                    Button {
-                        model.closeSelectedJob()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!model.canCloseSelectedJob)
-                    .help("Close")
                 }
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(model.jobs) { job in
-                            Button {
-                                model.selectedJobID = job.id
-                            } label: {
-                                VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(spacing: 6) {
                                     Text(job.tabTitle)
                                         .font(.caption)
                                         .lineLimit(1)
 
-                                    Text(job.worktreeDisplayName)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    Spacer()
+
+                                    jobActions(for: job)
                                 }
-                                .frame(width: 172, alignment: .leading)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(tabBackground(for: job))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 7)
-                                        .stroke(tabBorderColor(for: job), lineWidth: 1)
-                                }
-                                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+                                Text(job.branchName)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+
+                                jobStatusRow(for: job)
                             }
-                            .buttonStyle(.plain)
+                            .frame(width: 206, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(tabBackground(for: job))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(tabBorderColor(for: job), lineWidth: 1)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .contentShape(RoundedRectangle(cornerRadius: 7))
+                            .onTapGesture {
+                                model.selectedJobID = job.id
+                            }
                             .help(job.displayName)
                         }
                     }
                 }
             }
+        }
+    }
+
+    private func jobActions(for job: RunJob) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                model.stopJob(job.id)
+            } label: {
+                Image(systemName: "stop.fill")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!job.isRunning)
+            .help("Stop")
+
+            Button {
+                model.rerunJob(job.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Rerun")
+
+            Button {
+                model.closeJob(job.id)
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("Close")
+        }
+    }
+
+    @ViewBuilder
+    private func jobStatusRow(for job: RunJob) -> some View {
+        HStack(spacing: 5) {
+            if job.isRunning && !job.activityText.isEmpty {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text(job.activityText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Image(systemName: jobStatusSystemImage(for: job))
+                    .foregroundStyle(jobStatusColor(for: job))
+
+                Text(jobStatusText(for: job))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 14, alignment: .leading)
+    }
+
+    private func jobStatusText(for job: RunJob) -> String {
+        switch job.status {
+        case .running:
+            "Succeeded"
+        case .completed:
+            "Completed"
+        case .failed:
+            "Failed"
+        case .stopped:
+            "Stopped"
+        }
+    }
+
+    private func jobStatusSystemImage(for job: RunJob) -> String {
+        switch job.status {
+        case .running, .completed:
+            "checkmark.circle"
+        case .failed:
+            "xmark.circle"
+        case .stopped:
+            "stop.circle"
+        }
+    }
+
+    private func jobStatusColor(for job: RunJob) -> Color {
+        switch job.status {
+        case .running, .completed:
+            .green
+        case .failed:
+            .red
+        case .stopped:
+            .secondary
         }
     }
 

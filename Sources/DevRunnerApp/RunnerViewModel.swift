@@ -24,15 +24,17 @@ enum RunJobStatus: Equatable {
 struct RunJob: Identifiable {
     let id: UUID
     let worktreeDisplayName: String
+    let branchName: String
     let project: XcodeProject
     let scheme: String
     let destination: XcodeDestination
     let startedAt: Date
     var status: RunJobStatus
+    var activityText: String
     var logText: String
 
     var title: String {
-        "\(worktreeDisplayName) · \(scheme)"
+        "\(branchName) · \(scheme)"
     }
 
     var displayName: String {
@@ -70,6 +72,8 @@ final class RunnerViewModel: ObservableObject {
     @Published var destinations: [XcodeDestination] = []
     @Published var selectedScheme: String?
     @Published var selectedDestinationID: String?
+    @Published var favoriteSimulatorDestinationIDs: Set<String> = []
+    @Published var showsAllSimulators = false
     @Published var status = "Idle"
     @Published var jobs: [RunJob] = []
     @Published var selectedJobID: UUID?
@@ -77,18 +81,23 @@ final class RunnerViewModel: ObservableObject {
     private struct RunRequest {
         let replacingJobID: UUID?
         let worktreeDisplayName: String
+        let branchName: String
         let project: XcodeProject
         let scheme: String
         let destination: XcodeDestination
     }
 
     private let configuredDirectoryPathsKey = "configuredDirectoryPaths"
+    private let favoriteSimulatorDestinationIDsKey = "favoriteSimulatorDestinationIDs"
     private let worktreeContextResolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
     private var runServices: [UUID: BuildRunService] = [:]
 
     init() {
         configuredDirectoryPaths = UserDefaults.standard.stringArray(forKey: configuredDirectoryPathsKey) ?? []
+        favoriteSimulatorDestinationIDs = Set(
+            UserDefaults.standard.stringArray(forKey: favoriteSimulatorDestinationIDsKey) ?? []
+        )
     }
 
     var isRunning: Bool {
@@ -123,6 +132,49 @@ final class RunnerViewModel: ObservableObject {
     var selectedDestination: XcodeDestination? {
         guard let selectedDestinationID else { return nil }
         return destinations.first { $0.id == selectedDestinationID }
+    }
+
+    var displayedDestinations: [XcodeDestination] {
+        destinations.filter { destination in
+            destination.kind == .device ||
+            showsAllSimulators ||
+            favoriteSimulatorDestinationIDs.contains(destination.id)
+        }
+    }
+
+    var deviceDestinations: [XcodeDestination] {
+        destinations.filter { $0.kind == .device }
+    }
+
+    var favoriteSimulatorDestinations: [XcodeDestination] {
+        destinations.filter {
+            $0.kind == .simulator && favoriteSimulatorDestinationIDs.contains($0.id)
+        }
+    }
+
+    var otherSimulatorDestinations: [XcodeDestination] {
+        destinations.filter {
+            $0.kind == .simulator && !favoriteSimulatorDestinationIDs.contains($0.id)
+        }
+    }
+
+    var selectedDestinationTitle: String {
+        selectedDestination?.displayName ?? "Select"
+    }
+
+    var hiddenSimulatorCount: Int {
+        destinations.filter {
+            $0.kind == .simulator && !favoriteSimulatorDestinationIDs.contains($0.id)
+        }.count
+    }
+
+    var canToggleSelectedSimulatorFavorite: Bool {
+        selectedDestination?.kind == .simulator
+    }
+
+    var selectedSimulatorIsFavorite: Bool {
+        guard let selectedDestination, selectedDestination.kind == .simulator else { return false }
+        return favoriteSimulatorDestinationIDs.contains(selectedDestination.id)
     }
 
     var selectedJob: RunJob? {
@@ -163,12 +215,11 @@ final class RunnerViewModel: ObservableObject {
 
             worktrees = await resolvedWorktrees
             destinations = try await loadedDestinations
+            favoriteSimulatorDestinationIDs.formIntersection(Set(destinations.map(\.id)))
             selectedWorktreeID = selectedWorktreeID.flatMap { id in
                 worktrees.contains { $0.id == id } ? id : nil
             } ?? worktrees.first?.id
-            selectedDestinationID = selectedDestinationID.flatMap { id in
-                destinations.contains { $0.id == id } ? id : nil
-            } ?? destinations.first?.id
+            selectedDestinationID = preferredDestinationID(currentID: selectedDestinationID)
 
             try await reloadSchemesForSelectedWorktree()
             if configuredDirectoryPaths.isEmpty {
@@ -180,6 +231,35 @@ final class RunnerViewModel: ObservableObject {
             status = error.localizedDescription
             appendLogToSelectedJob("Refresh failed: \(error.localizedDescription)\n")
         }
+    }
+
+    func toggleShowsAllSimulators() {
+        showsAllSimulators.toggle()
+        selectedDestinationID = preferredDestinationID(currentID: selectedDestinationID)
+    }
+
+    func toggleSelectedSimulatorFavorite() {
+        guard let selectedDestination, selectedDestination.kind == .simulator else { return }
+        toggleSimulatorFavorite(selectedDestination.id)
+    }
+
+    func toggleSimulatorFavorite(_ destinationID: String) {
+        guard destinations.contains(where: { $0.id == destinationID && $0.kind == .simulator }) else {
+            return
+        }
+
+        if favoriteSimulatorDestinationIDs.contains(destinationID) {
+            favoriteSimulatorDestinationIDs.remove(destinationID)
+        } else {
+            favoriteSimulatorDestinationIDs.insert(destinationID)
+        }
+
+        saveFavoriteSimulatorDestinationIDs()
+        selectedDestinationID = preferredDestinationID(currentID: selectedDestinationID)
+    }
+
+    func selectDestination(_ destinationID: String) {
+        selectedDestinationID = destinationID
     }
 
     func worktreeSelectionChanged() async {
@@ -199,6 +279,7 @@ final class RunnerViewModel: ObservableObject {
         let request = RunRequest(
             replacingJobID: nil,
             worktreeDisplayName: selectedWorktree.displayName,
+            branchName: selectedWorktree.branchName,
             project: selectedWorktree.project,
             scheme: selectedScheme,
             destination: selectedDestination
@@ -211,18 +292,24 @@ final class RunnerViewModel: ObservableObject {
 
     func rerunSelectedJob() {
         guard let selectedJob else { return }
+        rerunJob(selectedJob.id)
+    }
+
+    func rerunJob(_ jobID: UUID) {
+        guard let job = jobs.first(where: { $0.id == jobID }) else { return }
 
         let request = RunRequest(
-            replacingJobID: selectedJob.id,
-            worktreeDisplayName: selectedJob.worktreeDisplayName,
-            project: selectedJob.project,
-            scheme: selectedJob.scheme,
-            destination: selectedJob.destination
+            replacingJobID: job.id,
+            worktreeDisplayName: job.worktreeDisplayName,
+            branchName: job.branchName,
+            project: job.project,
+            scheme: job.scheme,
+            destination: job.destination
         )
 
         Task {
-            if selectedJob.isRunning {
-                await stop(jobID: selectedJob.id)
+            if job.isRunning {
+                await stop(jobID: job.id)
             }
             await startRunReplacingDestination(request)
         }
@@ -230,19 +317,28 @@ final class RunnerViewModel: ObservableObject {
 
     func stopSelectedJob() {
         guard let selectedJob else { return }
-        Task { await stop(jobID: selectedJob.id) }
+        stopJob(selectedJob.id)
+    }
+
+    func stopJob(_ jobID: UUID) {
+        Task { await stop(jobID: jobID) }
     }
 
     func closeSelectedJob() {
         guard let selectedJob else { return }
+        closeJob(selectedJob.id)
+    }
 
-        if selectedJob.isRunning {
+    func closeJob(_ jobID: UUID) {
+        guard let job = jobs.first(where: { $0.id == jobID }) else { return }
+
+        if job.isRunning {
             Task {
-                await stop(jobID: selectedJob.id)
-                removeJob(jobID: selectedJob.id)
+                await stop(jobID: job.id)
+                removeJob(jobID: job.id)
             }
         } else {
-            removeJob(jobID: selectedJob.id)
+            removeJob(jobID: job.id)
         }
     }
 
@@ -273,16 +369,19 @@ final class RunnerViewModel: ObservableObject {
         let service = BuildRunService()
         if let index = jobs.firstIndex(where: { $0.id == jobID }) {
             jobs[index].status = .running
+            jobs[index].activityText = "Starting"
             jobs[index].logText = ""
         } else {
             let job = RunJob(
                 id: jobID,
                 worktreeDisplayName: request.worktreeDisplayName,
+                branchName: request.branchName,
                 project: request.project,
                 scheme: request.scheme,
                 destination: request.destination,
                 startedAt: Date(),
                 status: .running,
+                activityText: "Starting",
                 logText: ""
             )
             jobs.append(job)
@@ -296,12 +395,18 @@ final class RunnerViewModel: ObservableObject {
                 try await service.buildAndRun(
                     project: request.project,
                     scheme: request.scheme,
-                    destination: request.destination
-                ) { [weak self] text in
-                    Task { @MainActor in
-                        self?.appendLog(text, to: jobID)
+                    destination: request.destination,
+                    progress: { [weak self] text in
+                        Task { @MainActor in
+                            self?.updateActivity(text, for: jobID)
+                        }
+                    },
+                    consoleLog: { [weak self] text in
+                        Task { @MainActor in
+                            self?.appendLog(text, to: jobID)
+                        }
                     }
-                }
+                )
 
                 if jobs.first(where: { $0.id == jobID })?.status == .running {
                     finish(jobID: jobID, status: .completed, message: "")
@@ -339,6 +444,7 @@ final class RunnerViewModel: ObservableObject {
 
         if let index = jobs.firstIndex(where: { $0.id == jobID }) {
             jobs[index].status = .stopped
+            jobs[index].activityText = "Stopped"
             status = jobs.contains { $0.isRunning } ? "Running" : RunJobStatus.stopped.label
         }
 
@@ -350,6 +456,7 @@ final class RunnerViewModel: ObservableObject {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
 
         jobs[index].status = status
+        jobs[index].activityText = status.label
         if !message.isEmpty {
             appendLog(message, to: jobID)
         }
@@ -381,7 +488,29 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
+    private func updateActivity(_ text: String, for jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+
+        jobs[index].activityText = text
+    }
+
+    private func preferredDestinationID(currentID: String?) -> String? {
+        if let currentID,
+           displayedDestinations.contains(where: { $0.id == currentID }) {
+            return currentID
+        }
+
+        return displayedDestinations.first?.id
+    }
+
     private func saveConfiguredDirectoryPaths() {
         UserDefaults.standard.set(configuredDirectoryPaths, forKey: configuredDirectoryPathsKey)
+    }
+
+    private func saveFavoriteSimulatorDestinationIDs() {
+        UserDefaults.standard.set(
+            Array(favoriteSimulatorDestinationIDs).sorted(),
+            forKey: favoriteSimulatorDestinationIDsKey
+        )
     }
 }

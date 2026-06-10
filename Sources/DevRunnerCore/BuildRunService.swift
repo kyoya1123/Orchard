@@ -5,6 +5,7 @@ public final class BuildRunService: @unchecked Sendable {
     private var runningProcess: Process?
     private var launchedApp: RunnableApp?
     private var isStopping = false
+    private var shouldStop = false
 
     public init(processRunner: ProcessRunner = ProcessRunner()) {
         self.processRunner = processRunner
@@ -12,6 +13,7 @@ public final class BuildRunService: @unchecked Sendable {
 
     public func stop() {
         isStopping = true
+        shouldStop = true
         runningProcess?.terminate()
         runningProcess = nil
     }
@@ -43,38 +45,34 @@ public final class BuildRunService: @unchecked Sendable {
         project: XcodeProject,
         scheme: String,
         destination: XcodeDestination,
+        progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
-        let derivedDataURL = FileManager.default
-            .temporaryDirectory
-            .appendingPathComponent("DevRunnerDerivedData", isDirectory: true)
-            .appendingPathComponent(project.id, isDirectory: true)
-
-        try FileManager.default.createDirectory(
-            at: derivedDataURL,
-            withIntermediateDirectories: true
-        )
+        shouldStop = false
+        isStopping = false
 
         let buildArguments = project.xcodebuildArguments + [
             "-scheme", scheme,
             "-destination", destination.xcodebuildDestination,
-            "-derivedDataPath", derivedDataURL.path,
             "build"
         ]
 
+        progress("Building")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             arguments: buildArguments,
             currentDirectoryURL: project.rootURL,
             log: { _ in }
         )
+        try throwIfStopped()
 
+        progress("Resolving build product")
         let settings = try await XcodeService().buildSettings(
             project: project,
             scheme: scheme,
-            destination: destination,
-            derivedDataURL: derivedDataURL
+            destination: destination
         )
+        try throwIfStopped()
 
         guard let app = settings.firstRunnableApp else {
             throw DevRunnerError.message("ビルド成果物の .app と bundle identifier を特定できませんでした。")
@@ -83,30 +81,46 @@ public final class BuildRunService: @unchecked Sendable {
 
         switch destination.kind {
         case .device:
-            try await installAndLaunchOnDevice(app: app, destination: destination, consoleLog: consoleLog)
+            try await installAndLaunchOnDevice(
+                app: app,
+                destination: destination,
+                progress: progress,
+                consoleLog: consoleLog
+            )
         case .simulator:
-            try await installAndLaunchOnSimulator(app: app, destination: destination, consoleLog: consoleLog)
+            try await installAndLaunchOnSimulator(
+                app: app,
+                destination: destination,
+                progress: progress,
+                consoleLog: consoleLog
+            )
         }
     }
 
     private func installAndLaunchOnSimulator(
         app: RunnableApp,
         destination: XcodeDestination,
+        progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
+        progress("Booting simulator")
         _ = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "boot", destination.id],
             currentDirectoryURL: nil
         )
+        try throwIfStopped()
 
+        progress("Installing")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "install", destination.id, app.appURL.path],
             currentDirectoryURL: nil,
             log: { _ in }
         )
+        try throwIfStopped()
 
+        progress("")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: [
@@ -120,13 +134,16 @@ public final class BuildRunService: @unchecked Sendable {
             currentDirectoryURL: nil,
             log: consoleLog
         )
+        try throwIfStopped()
     }
 
     private func installAndLaunchOnDevice(
         app: RunnableApp,
         destination: XcodeDestination,
+        progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void
     ) async throws {
+        progress("Installing")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: [
@@ -142,7 +159,9 @@ public final class BuildRunService: @unchecked Sendable {
             currentDirectoryURL: nil,
             log: { _ in }
         )
+        try throwIfStopped()
 
+        progress("")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: [
@@ -160,6 +179,7 @@ public final class BuildRunService: @unchecked Sendable {
             currentDirectoryURL: nil,
             log: consoleLog
         )
+        try throwIfStopped()
     }
 
     private func terminateOnSimulator(
@@ -341,6 +361,12 @@ public final class BuildRunService: @unchecked Sendable {
                 runningProcess = nil
                 continuation.resume(throwing: error)
             }
+        }
+    }
+
+    private func throwIfStopped() throws {
+        if shouldStop {
+            throw DevRunnerError.message("Stopped.")
         }
     }
 }

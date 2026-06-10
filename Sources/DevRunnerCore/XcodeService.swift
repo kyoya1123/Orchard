@@ -57,15 +57,13 @@ public struct XcodeService: Sendable {
     public func buildSettings(
         project: XcodeProject,
         scheme: String,
-        destination: XcodeDestination,
-        derivedDataURL: URL
+        destination: XcodeDestination
     ) async throws -> XcodeBuildSettings {
         let output = try await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             arguments: project.xcodebuildArguments + [
                 "-scheme", scheme,
                 "-destination", destination.xcodebuildDestination,
-                "-derivedDataPath", derivedDataURL.path,
                 "-showBuildSettings",
                 "-json"
             ],
