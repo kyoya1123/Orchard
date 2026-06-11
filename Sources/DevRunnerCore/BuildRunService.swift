@@ -46,7 +46,8 @@ public final class BuildRunService: @unchecked Sendable {
         scheme: String,
         destination: XcodeDestination,
         progress: @Sendable @escaping (String) -> Void,
-        consoleLog: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void,
+        commandLog: @Sendable @escaping (String) -> Void = { _ in }
     ) async throws {
         shouldStop = false
         isStopping = false
@@ -58,11 +59,12 @@ public final class BuildRunService: @unchecked Sendable {
         ]
 
         progress("Building")
+        commandLog("$ xcodebuild \(buildArguments.joined(separator: " "))\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             arguments: buildArguments,
             currentDirectoryURL: project.rootURL,
-            log: { _ in }
+            log: commandLog
         )
         try throwIfStopped()
 
@@ -85,14 +87,16 @@ public final class BuildRunService: @unchecked Sendable {
                 app: app,
                 destination: destination,
                 progress: progress,
-                consoleLog: consoleLog
+                consoleLog: consoleLog,
+                commandLog: commandLog
             )
         case .simulator:
             try await installAndLaunchOnSimulator(
                 app: app,
                 destination: destination,
                 progress: progress,
-                consoleLog: consoleLog
+                consoleLog: consoleLog,
+                commandLog: commandLog
             )
         }
     }
@@ -101,9 +105,11 @@ public final class BuildRunService: @unchecked Sendable {
         app: RunnableApp,
         destination: XcodeDestination,
         progress: @Sendable @escaping (String) -> Void,
-        consoleLog: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void,
+        commandLog: @Sendable @escaping (String) -> Void
     ) async throws {
         progress("Booting simulator")
+        commandLog("$ xcrun simctl boot \(destination.id)\n")
         _ = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "boot", destination.id],
@@ -112,11 +118,12 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         progress("Installing")
+        commandLog("$ xcrun simctl install \(destination.id) \(app.appURL.path)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "install", destination.id, app.appURL.path],
             currentDirectoryURL: nil,
-            log: { _ in }
+            log: commandLog
         )
         try throwIfStopped()
 
@@ -141,9 +148,11 @@ public final class BuildRunService: @unchecked Sendable {
         app: RunnableApp,
         destination: XcodeDestination,
         progress: @Sendable @escaping (String) -> Void,
-        consoleLog: @Sendable @escaping (String) -> Void
+        consoleLog: @Sendable @escaping (String) -> Void,
+        commandLog: @Sendable @escaping (String) -> Void
     ) async throws {
         progress("Installing")
+        commandLog("$ xcrun devicectl device install app --device \(destination.id) \(app.appURL.path)\n")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: [
@@ -157,7 +166,7 @@ public final class BuildRunService: @unchecked Sendable {
                 app.appURL.path
             ],
             currentDirectoryURL: nil,
-            log: { _ in }
+            log: commandLog
         )
         try throwIfStopped()
 

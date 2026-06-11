@@ -59,8 +59,19 @@ struct RunJob: Identifiable {
     }
 
     var tabTitle: String {
-        "\(statusIcon) \(destination.name) · \(scheme)"
+        "\(statusIcon) \(branchName)"
     }
+
+    var tabSubtitle: String {
+        "\(destination.name) · \(scheme)"
+    }
+}
+
+struct RunJobGroup: Identifiable {
+    let projectID: String
+    let jobs: [RunJob]
+
+    var id: String { projectID }
 }
 
 @MainActor
@@ -77,6 +88,10 @@ final class RunnerViewModel: ObservableObject {
     @Published var status = "Idle"
     @Published var jobs: [RunJob] = []
     @Published var selectedJobID: UUID?
+    @Published var globalHotKey: GlobalHotKey?
+    @Published var isRefreshing = false
+    @Published var isLoadingSchemes = false
+    @Published var appLogText = ""
 
     private struct RunRequest {
         let replacingJobID: UUID?
@@ -89,15 +104,30 @@ final class RunnerViewModel: ObservableObject {
 
     private let configuredDirectoryPathsKey = "configuredDirectoryPaths"
     private let favoriteSimulatorDestinationIDsKey = "favoriteSimulatorDestinationIDs"
+    private let globalHotKeyKey = "globalHotKey"
+    private let schemeCacheKey = "schemeCache"
     private let worktreeContextResolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
+    private let globalHotKeyManager = GlobalHotKeyManager()
     private var runServices: [UUID: BuildRunService] = [:]
+    // Keyed by the project file path: project.id hashes are not stable
+    // across launches, and this cache is persisted.
+    private var schemeCache: [String: [String]] = [:]
 
     init() {
         configuredDirectoryPaths = UserDefaults.standard.stringArray(forKey: configuredDirectoryPathsKey) ?? []
         favoriteSimulatorDestinationIDs = Set(
             UserDefaults.standard.stringArray(forKey: favoriteSimulatorDestinationIDsKey) ?? []
         )
+
+        if let data = UserDefaults.standard.data(forKey: globalHotKeyKey),
+           let hotKey = try? JSONDecoder().decode(GlobalHotKey.self, from: data) {
+            globalHotKey = hotKey
+        }
+        globalHotKeyManager.handler = { MenuBarWindowPresenter.toggle() }
+        applyGlobalHotKey()
+
+        schemeCache = UserDefaults.standard.dictionary(forKey: schemeCacheKey) as? [String: [String]] ?? [:]
     }
 
     var isRunning: Bool {
@@ -182,6 +212,21 @@ final class RunnerViewModel: ObservableObject {
         return jobs.first { $0.id == selectedJobID }
     }
 
+    var jobGroups: [RunJobGroup] {
+        var order: [String] = []
+        var grouped: [String: [RunJob]] = [:]
+
+        for job in jobs {
+            let key = job.project.id
+            if grouped[key] == nil {
+                order.append(key)
+            }
+            grouped[key, default: []].append(job)
+        }
+
+        return order.map { RunJobGroup(projectID: $0, jobs: grouped[$0] ?? []) }
+    }
+
     var logText: String {
         selectedJob?.logText ?? ""
     }
@@ -198,13 +243,42 @@ final class RunnerViewModel: ObservableObject {
         saveConfiguredDirectoryPaths()
     }
 
-    func removeConfiguredDirectory(at offsets: IndexSet) {
-        configuredDirectoryPaths.remove(atOffsets: offsets)
+    func removeConfiguredDirectory(_ path: String) {
+        configuredDirectoryPaths.removeAll { $0 == path }
         saveConfiguredDirectoryPaths()
+    }
+
+    func setGlobalHotKey(_ hotKey: GlobalHotKey?) {
+        globalHotKey = hotKey
+
+        if let hotKey, let data = try? JSONEncoder().encode(hotKey) {
+            UserDefaults.standard.set(data, forKey: globalHotKeyKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: globalHotKeyKey)
+        }
+
+        applyGlobalHotKey()
+    }
+
+    private func applyGlobalHotKey() {
+        if let globalHotKey {
+            globalHotKeyManager.register(
+                keyCode: globalHotKey.keyCode,
+                modifiers: globalHotKey.carbonModifiers
+            )
+        } else {
+            globalHotKeyManager.unregister()
+        }
     }
 
     func refresh() async {
         status = "Refreshing"
+        // Show the loading state only on a cold start. With cached data the
+        // refresh runs silently in the background and swaps results in.
+        if worktrees.isEmpty && destinations.isEmpty {
+            isRefreshing = true
+        }
+        defer { isRefreshing = false }
 
         do {
             let configuredDirectoryURLs = configuredDirectoryURLs
@@ -229,7 +303,7 @@ final class RunnerViewModel: ObservableObject {
             }
         } catch {
             status = error.localizedDescription
-            appendLogToSelectedJob("Refresh failed: \(error.localizedDescription)\n")
+            appendAppLog("[\(timestamp())] Refresh failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -263,13 +337,22 @@ final class RunnerViewModel: ObservableObject {
     }
 
     func worktreeSelectionChanged() async {
+        let hasCachedSchemes = selectedWorktree.map {
+            schemeCache[$0.project.fileURL.path] != nil
+        } ?? true
+
+        if !hasCachedSchemes {
+            isLoadingSchemes = true
+        }
+        defer { isLoadingSchemes = false }
+
         do {
             status = "Loading schemes"
             try await reloadSchemesForSelectedWorktree()
             status = "Ready"
         } catch {
             status = error.localizedDescription
-            appendLogToSelectedJob("Scheme load failed: \(error.localizedDescription)\n")
+            appendAppLog("[\(timestamp())] Scheme load failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -358,7 +441,23 @@ final class RunnerViewModel: ObservableObject {
             return
         }
 
+        let cacheKey = selectedWorktree.project.fileURL.path
+
+        // Serve cached schemes immediately; the fresh list replaces them below.
+        if let cachedSchemes = schemeCache[cacheKey], schemes != cachedSchemes || schemes.isEmpty {
+            applySchemes(cachedSchemes)
+        }
+
         let loadedSchemes = try await xcodeService.schemes(project: selectedWorktree.project)
+        schemeCache[cacheKey] = loadedSchemes
+        UserDefaults.standard.set(schemeCache, forKey: schemeCacheKey)
+
+        // The user may have switched projects while xcodebuild was running.
+        guard self.selectedWorktree?.project.fileURL.path == cacheKey else { return }
+        applySchemes(loadedSchemes)
+    }
+
+    private func applySchemes(_ loadedSchemes: [String]) {
         schemes = loadedSchemes
         selectedScheme = selectedScheme.flatMap { loadedSchemes.contains($0) ? $0 : nil } ?? loadedSchemes.first
     }
@@ -390,6 +489,9 @@ final class RunnerViewModel: ObservableObject {
         runServices[jobID] = service
         status = "Running"
 
+        let jobLabel = "\(request.branchName) · \(request.scheme) → \(request.destination.name)"
+        appendAppLog("\n[\(timestamp())] ▶ \(jobLabel)\n")
+
         Task {
             do {
                 try await service.buildAndRun(
@@ -405,15 +507,22 @@ final class RunnerViewModel: ObservableObject {
                         Task { @MainActor in
                             self?.appendLog(text, to: jobID)
                         }
+                    },
+                    commandLog: { [weak self] text in
+                        Task { @MainActor in
+                            self?.appendAppLog(text)
+                        }
                     }
                 )
 
                 if jobs.first(where: { $0.id == jobID })?.status == .running {
+                    appendAppLog("[\(timestamp())] ■ \(jobLabel): console detached\n")
                     finish(jobID: jobID, status: .completed, message: "")
                 }
             } catch {
                 let currentStatus = jobs.first { $0.id == jobID }?.status
                 if currentStatus != .stopped {
+                    appendAppLog("[\(timestamp())] ✖ \(jobLabel): \(error.localizedDescription)\n")
                     finish(jobID: jobID, status: .failed, message: "")
                 }
             }
@@ -421,16 +530,37 @@ final class RunnerViewModel: ObservableObject {
     }
 
     private func startRunReplacingDestination(_ request: RunRequest) async {
-        let replacingJobID = request.replacingJobID
-        let replacedJobs = jobs.filter {
-            $0.destination.id == request.destination.id && $0.id != replacingJobID
+        var request = request
+
+        // Reuse the existing job instead of stacking a new one when the
+        // branch, scheme, and destination all match.
+        if request.replacingJobID == nil,
+           let duplicate = jobs.first(where: {
+               $0.branchName == request.branchName &&
+               $0.scheme == request.scheme &&
+               $0.destination.id == request.destination.id
+           }) {
+            request = RunRequest(
+                replacingJobID: duplicate.id,
+                worktreeDisplayName: request.worktreeDisplayName,
+                branchName: request.branchName,
+                project: request.project,
+                scheme: request.scheme,
+                destination: request.destination
+            )
         }
 
-        for job in replacedJobs {
-            if job.isRunning {
-                await stop(jobID: job.id)
-            }
-            removeJob(jobID: job.id)
+        let replacingJobID = request.replacingJobID
+        let conflictingJobs = jobs.filter {
+            $0.destination.id == request.destination.id && $0.id != replacingJobID && $0.isRunning
+        }
+
+        for job in conflictingJobs {
+            await stop(jobID: job.id)
+        }
+
+        if let replacingJobID, jobs.first(where: { $0.id == replacingJobID })?.isRunning == true {
+            await stop(jobID: replacingJobID)
         }
 
         startRun(request)
@@ -448,7 +578,12 @@ final class RunnerViewModel: ObservableObject {
             status = jobs.contains { $0.isRunning } ? "Running" : RunJobStatus.stopped.label
         }
 
-        await service.stopCompletely(destination: job.destination) { _ in }
+        appendAppLog("[\(timestamp())] ⏹ \(job.branchName) · \(job.scheme) → \(job.destination.name): stopped\n")
+        await service.stopCompletely(destination: job.destination) { [weak self] text in
+            Task { @MainActor in
+                self?.appendAppLog(text)
+            }
+        }
         runServices[jobID] = nil
     }
 
@@ -473,9 +608,26 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
-    private func appendLogToSelectedJob(_ text: String) {
-        guard let jobID = selectedJob?.id else { return }
-        appendLog(text, to: jobID)
+    func clearAppLog() {
+        appLogText = ""
+    }
+
+    private func appendAppLog(_ text: String) {
+        appLogText += text
+        let maxLength = 200_000
+        if appLogText.count > maxLength {
+            appLogText = String(appLogText.suffix(maxLength))
+        }
+    }
+
+    private static let logTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    private func timestamp() -> String {
+        Self.logTimeFormatter.string(from: Date())
     }
 
     private func appendLog(_ text: String, to jobID: UUID) {
