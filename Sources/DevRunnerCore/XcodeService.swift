@@ -34,7 +34,8 @@ public struct XcodeService: Sendable {
                     name: device.name,
                     runtime: device.operatingSystemVersion,
                     isAvailable: device.available,
-                    kind: device.supportedDestinationKind ?? .simulator
+                    kind: device.supportedDestinationKind ?? .simulator,
+                    modelCode: device.modelCode ?? ""
                 )
             }
             .sorted {
@@ -93,6 +94,7 @@ private struct XCDevice: Decodable {
     let ignored: Bool
     let simulator: Bool
     let platform: String
+    let modelCode: String?
 
     var supportedDestinationKind: XcodeDestination.Kind? {
         switch platform {
