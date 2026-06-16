@@ -230,7 +230,7 @@ struct RunnerMenuView: View {
 
     private var destinationRow: some View {
         configRow(
-            icon: "iphone",
+            icon: model.selectedDestination?.symbolName ?? "iphone",
             title: "Destination",
             value: model.selectedDestination?.displayName ?? "Select",
             isPlaceholder: model.selectedDestination == nil,
@@ -239,7 +239,7 @@ struct RunnerMenuView: View {
             if !model.deviceDestinations.isEmpty {
                 Section("Devices") {
                     ForEach(model.deviceDestinations) { destination in
-                        destinationButton(destination, systemImage: "iphone")
+                        destinationButton(destination, systemImage: destination.symbolName)
                     }
                 }
             }
