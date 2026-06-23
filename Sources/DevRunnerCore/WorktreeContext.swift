@@ -38,6 +38,10 @@ public struct WorktreeContext: Equatable, Identifiable, Sendable {
         terminalContexts.contains { $0.isFocused }
     }
 
+    public var lastModified: Date? {
+        gitInfo?.lastModified
+    }
+
     public var displayName: String {
         let focusedPrefix = isFocused ? "Focused · " : ""
         return "\(focusedPrefix)\(worktreeURL.lastPathComponent) · \(branchName)"
@@ -295,10 +299,17 @@ public struct WorktreeContextResolver: Sendable {
     }
 
     private func sortWorktrees(_ lhs: WorktreeContext, _ rhs: WorktreeContext) -> Bool {
-        if lhs.isFocused != rhs.isFocused {
-            return lhs.isFocused
+        // Most recently committed worktrees first. Entries without a known
+        // commit date sort last, breaking ties by path for stable ordering.
+        switch (lhs.lastModified, rhs.lastModified) {
+        case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+            return lhsDate > rhsDate
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        default:
+            return lhs.worktreeURL.path < rhs.worktreeURL.path
         }
-
-        return lhs.worktreeURL.path < rhs.worktreeURL.path
     }
 }

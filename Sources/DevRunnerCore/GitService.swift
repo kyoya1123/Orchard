@@ -3,10 +3,12 @@ import Foundation
 public struct GitInfo: Equatable, Sendable {
     public let rootURL: URL
     public let branchName: String?
+    public let lastModified: Date?
 
-    public init(rootURL: URL, branchName: String?) {
+    public init(rootURL: URL, branchName: String?, lastModified: Date? = nil) {
         self.rootURL = rootURL
         self.branchName = branchName
+        self.lastModified = lastModified
     }
 }
 
@@ -31,8 +33,21 @@ public struct GitService: Sendable {
 
         return GitInfo(
             rootURL: rootURL,
-            branchName: branchName?.isEmpty == true ? nil : branchName
+            branchName: branchName?.isEmpty == true ? nil : branchName,
+            lastModified: await lastCommitDate(at: rootURL)
         )
+    }
+
+    private func lastCommitDate(at rootURL: URL) async -> Date? {
+        guard let output = try? await ProcessRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/git"),
+            arguments: ["-C", rootURL.path, "log", "-1", "--format=%ct"],
+            currentDirectoryURL: nil
+        ), let seconds = TimeInterval(output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+
+        return Date(timeIntervalSince1970: seconds)
     }
 
     public func worktreeRootURLs(from repositoryURL: URL) async -> [URL] {
