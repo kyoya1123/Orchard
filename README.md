@@ -63,6 +63,61 @@ Builds are handled by `BuildRunService`.
 
 `--console` keeps the launch process attached after the app starts. This is why the job can remain `running` after the build is already done.
 
+## CLI
+
+The same `dev-runner` binary is also a headless CLI: pass a subcommand and it
+runs the build/launch pipeline without starting the menu bar GUI. With no
+arguments it launches the GUI as before. This lets an agent drive a run from
+the terminal — "build this branch with ProdDebug on iPhone 15" — using the same
+`BuildRunService` the UI uses.
+
+```bash
+# Build + install + launch (blocks until the launched app exits)
+dev-runner run --branch <branch> --scheme <scheme> --destination <name-or-udid> \
+  [--device | --simulator] [--timeout <seconds>] [--dir <path> ...] [--json]
+
+# Discovery
+dev-runner list branches [--dir <path> ...] [--json]
+dev-runner list schemes --branch <branch> [--dir <path> ...] [--json]
+dev-runner list destinations [--device | --simulator] [--json]
+```
+
+Branch, scheme, and destination are fuzzy matched (exact → case-insensitive →
+prefix → substring); a destination UDID matches exactly. Ambiguous input lists
+the candidates so you can narrow it (e.g. pass a worktree path fragment or a
+UDID).
+
+Output and exit codes (designed for agents):
+
+- Build/tool command lines and progress go to **stderr**; the launched app's
+  console output goes to **stdout**.
+- `--json` emits NDJSON events on stdout: `{"type":"progress"|"command"|"console"|"result"|"error", ...}`.
+- Exit codes: `0` success, `2` not found, `3` ambiguous, `4` build/launch
+  failed, `130` interrupted (Ctrl-C, which also terminates the launched app).
+
+CLI runs also appear in the GUI's Runs list. Each `run` writes a `RunRecord`
+to a shared store (`~/Library/Application Support/DevRunner/runs/<id>.json`),
+updating it as the run progresses; the menu bar app polls that store (~every
+1.5s) and mirrors CLI runs as read-only jobs (marked with a terminal icon).
+The CLI itself stays terminal-complete — this store is a one-way side channel
+for GUI visibility, not an IPC dependency, so `run` works whether or not the GUI
+is open. CLI jobs in the GUI can't be stopped/rerun from the UI (the CLI owns
+the process); Close removes the record. Finished records are pruned after 24h.
+
+Directory precedence for worktree discovery: `--dir` overrides the
+`DEVRUNNER_DIRS` env var (colon-separated), which overrides the directories the
+GUI persisted. The CLI reads the GUI's settings via
+`UserDefaults(suiteName: "dev.codex.DevRunner")` — necessary because a bare
+binary has no bundle id, so `UserDefaults.standard` would resolve to a different
+domain than the bundled GUI. Run via the bundle or rely on `--dir`/`DEVRUNNER_DIRS`
+if the shared defaults are unavailable.
+
+After `Scripts/package-app.sh`, symlink the binary onto your PATH:
+
+```bash
+ln -sf /Users/kyoya/Projects/DevRunner/DevRunner.app/Contents/MacOS/dev-runner /usr/local/bin/dev-runner
+```
+
 ## Discovery Model
 
 Worktree discovery is independent of any terminal app.
@@ -85,8 +140,15 @@ Terminal integration code still exists (`TerminalContextProvider`, `GhosttyConte
 
 ## Source Map
 
+- `Sources/DevRunnerApp/main.swift`
+  - Process entry point. Dispatches to the GUI (no args) or the headless CLI (subcommand given).
 - `Sources/DevRunnerApp/DevRunnerApp.swift`
-  - App entry point and `MenuBarExtra`.
+  - `MenuBarExtra` app definition (no longer `@main`; launched from `main.swift`).
+- `Sources/DevRunnerApp/CLI/`
+  - `DevRunnerCLI.swift`: root command, shared `--dir`/`--json` options, concrete-type dispatch (`runDevRunnerCLI`).
+  - `RunCommand.swift`: `run` subcommand and exit-code mapping.
+  - `ListCommand.swift`: `list branches|schemes|destinations`.
+  - `CLIEnvironment.swift`: directory resolution, fetching, build-log wiring, Ctrl-C/timeout handling, NDJSON events.
 - `Sources/DevRunnerApp/RunnerMenuView.swift`
   - Menu bar UI.
   - Project/scheme/destination controls.
@@ -116,6 +178,12 @@ Terminal integration code still exists (`TerminalContextProvider`, `GhosttyConte
   - Build/install/launch/stop implementation.
 - `Sources/DevRunnerCore/XcodeModels.swift`
   - Shared model types.
+- `Sources/DevRunnerCore/SelectionResolver.swift`
+  - Resolves human-readable branch/scheme/destination names to model objects (staged fuzzy matching). Shared by the CLI.
+- `Sources/DevRunnerCore/AppConfiguration.swift`
+  - UserDefaults suite name and key constants shared by the GUI and CLI.
+- `Sources/DevRunnerCore/RunRecord.swift` / `RunStore.swift`
+  - Serializable run snapshot and the shared on-disk store (`Application Support/DevRunner/runs/`) the CLI writes and the GUI polls, so CLI runs show in the Runs list.
 - `Scripts/package-app.sh`
   - Builds and packages `DevRunner.app`.
 
