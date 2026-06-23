@@ -1,7 +1,6 @@
 import DevRunnerCore
 import SwiftUI
 
-@main
 struct DevRunnerApp: App {
     @StateObject private var model = RunnerViewModel()
 

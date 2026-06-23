@@ -1,0 +1,411 @@
+import ArgumentParser
+import DevRunnerCore
+import Foundation
+
+/// Thrown when the user interrupts a run with Ctrl-C. Surfaced as exit code 130.
+struct InterruptedError: Error {}
+
+/// Thrown when build / install / launch fails. Surfaced as exit code 4.
+struct BuildFailure: Error, CustomStringConvertible {
+    let message: String
+    var description: String { message }
+}
+
+/// Shared machinery for the `run` and `list` subcommands: resolves which
+/// directories to scan, fetches worktrees/schemes/destinations via the same
+/// `DevRunnerCore` services the GUI uses, wires build logs to stdout/stderr,
+/// and manages clean Ctrl-C teardown.
+final class CLIEnvironment: @unchecked Sendable {
+    let directoryURLs: [URL]
+    let json: Bool
+
+    private let resolver = WorktreeContextResolver()
+    private let xcodeService = XcodeService()
+    private let outputLock = NSLock()
+
+    // Guards `service`, `interrupted`, and `timedOut`, which are touched from
+    // the SIGINT and timeout queues as well as the main run task.
+    private let stateLock = NSLock()
+    private var service: BuildRunService?
+    private var interrupted = false
+    private var timedOut = false
+    private var activeDestination: XcodeDestination?
+    private var signalSource: DispatchSourceSignal?
+
+    // Shared run record written for GUI visibility. Guarded by recordLock since
+    // it is mutated from build callbacks running on arbitrary threads.
+    private let recordLock = NSLock()
+    private var record: RunRecord?
+    private var lastPersist: Date?
+
+    /// Directory precedence: explicit `--dir` overrides everything, then the
+    /// `DEVRUNNER_DIRS` env var (colon-separated), then the directories the GUI
+    /// persisted. This lets the CLI work standalone in CI while still sharing
+    /// the GUI's configuration on a developer machine.
+    init(extraDirectoryPaths: [String], json: Bool) {
+        var paths = extraDirectoryPaths
+
+        if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["DEVRUNNER_DIRS"], !envValue.isEmpty {
+            paths = envValue.split(separator: ":").map(String.init)
+        }
+
+        if paths.isEmpty {
+            paths = AppConfiguration.configuredDirectoryPaths()
+        }
+
+        directoryURLs = paths.map {
+            URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        self.json = json
+    }
+
+    // MARK: - Fetching
+
+    func worktrees() async -> [WorktreeContext] {
+        await resolver.resolve(fromConfiguredDirectoryURLs: directoryURLs)
+    }
+
+    func schemes(for project: XcodeProject) async throws -> [String] {
+        try await xcodeService.schemes(project: project)
+    }
+
+    func destinations() async throws -> [XcodeDestination] {
+        try await xcodeService.destinations()
+    }
+
+    // MARK: - Run
+
+    func performRun(
+        branch: String,
+        scheme: String,
+        destination: String,
+        kindFilter: XcodeDestination.Kind?,
+        timeout: Int?
+    ) async throws {
+        let worktrees = await worktrees()
+        guard !worktrees.isEmpty else {
+            throw SelectionError.notFound(kind: "branch", query: branch, available: [])
+        }
+        let worktree = try SelectionResolver.resolveWorktree(name: branch, in: worktrees).get()
+
+        let schemeList: [String]
+        do {
+            schemeList = try await schemes(for: worktree.project)
+        } catch {
+            throw BuildFailure(message: "Failed to list schemes: \(error)")
+        }
+        let resolvedScheme = try SelectionResolver.resolveScheme(name: scheme, in: schemeList).get()
+
+        let destinationList: [XcodeDestination]
+        do {
+            destinationList = try await destinations()
+        } catch {
+            throw BuildFailure(message: "Failed to list destinations: \(error)")
+        }
+        let resolvedDestination = try SelectionResolver.resolveDestination(
+            name: destination,
+            kind: kindFilter,
+            in: destinationList
+        ).get()
+
+        // One run per destination: cancel and drop any existing run on this same
+        // destination so re-running the same branch/scheme/destination replaces
+        // the previous one instead of stacking (mirrors the GUI's behavior).
+        await supersedeRuns(onDestination: resolvedDestination.id)
+
+        startRecord(
+            worktree: worktree,
+            scheme: resolvedScheme,
+            destination: resolvedDestination
+        )
+        emitProgress("Selected \(worktree.branchName) · \(resolvedScheme) · \(resolvedDestination.displayName)")
+
+        let service = BuildRunService()
+        setService(service)
+        activeDestination = resolvedDestination
+        installSignalHandler()
+        defer { teardownSignalHandler() }
+
+        let buildTask = Task {
+            try await service.buildAndRun(
+                project: worktree.project,
+                scheme: resolvedScheme,
+                destination: resolvedDestination,
+                progress: { self.emitProgress($0) },
+                consoleLog: { self.emitConsole($0) },
+                commandLog: { self.emitCommand($0) }
+            )
+        }
+
+        var timeoutTask: Task<Void, Never>?
+        if let timeout, timeout > 0 {
+            timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                self.markTimedOut()
+                self.emitProgress("Timeout reached after \(timeout)s — stopping")
+                self.currentService()?.stop()
+            }
+        }
+
+        do {
+            try await buildTask.value
+            timeoutTask?.cancel()
+        } catch {
+            timeoutTask?.cancel()
+
+            // SIGINT and timeout both need the launched app torn down, not just
+            // the local xcrun/xcodebuild process that `stop()` killed.
+            if isInterrupted() {
+                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+                throw InterruptedError()
+            }
+            if isTimedOut() {
+                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+                throw BuildFailure(message: "Timed out after \(timeout ?? 0)s")
+            }
+            throw BuildFailure(message: "\(error)")
+        }
+
+        emitResult(status: "completed", exitCode: 0)
+    }
+
+    // MARK: - Signal handling
+
+    private func installSignalHandler() {
+        signal(SIGINT, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.markInterrupted()
+            self.emitProgress("Interrupted — stopping run")
+            self.currentService()?.stop()
+        }
+        source.resume()
+        signalSource = source
+    }
+
+    // MARK: - Synchronized run state
+
+    private func setService(_ newService: BuildRunService?) {
+        stateLock.lock()
+        service = newService
+        stateLock.unlock()
+    }
+
+    private func currentService() -> BuildRunService? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return service
+    }
+
+    private func markInterrupted() {
+        stateLock.lock()
+        interrupted = true
+        stateLock.unlock()
+    }
+
+    private func isInterrupted() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return interrupted
+    }
+
+    private func markTimedOut() {
+        stateLock.lock()
+        timedOut = true
+        stateLock.unlock()
+    }
+
+    private func isTimedOut() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return timedOut
+    }
+
+    private func teardownSignalHandler() {
+        signalSource?.cancel()
+        signalSource = nil
+        signal(SIGINT, SIG_DFL)
+    }
+
+    // MARK: - Output
+
+    /// Diagnostic/progress lines go to stderr so stdout stays clean for the
+    /// app's own console output (or NDJSON events in `--json` mode).
+    func emitProgress(_ message: String) {
+        updateRecord(persistNow: true) { $0.activityText = message }
+        if json {
+            emitEvent(CLIEvent(type: "progress", stage: message))
+        } else {
+            writeLine(message, to: .standardError)
+        }
+    }
+
+    func emitCommand(_ chunk: String) {
+        if json {
+            emitEvent(CLIEvent(type: "command", text: chunk))
+        } else {
+            write(chunk, to: .standardError)
+        }
+    }
+
+    func emitConsole(_ chunk: String) {
+        // Console output can be voluminous; persist throttled.
+        updateRecord(persistNow: false) { $0.log = Self.boundedAppend($0.log, chunk) }
+        if json {
+            emitEvent(CLIEvent(type: "console", text: chunk))
+        } else {
+            write(chunk, to: .standardOutput)
+        }
+    }
+
+    func emitResult(status: String, exitCode: Int) {
+        updateRecord(persistNow: true) {
+            if let mapped = RunRecord.Status(rawValue: status) {
+                $0.status = mapped
+            }
+            $0.activityText = status.capitalized
+        }
+        if json {
+            emitEvent(CLIEvent(type: "result", status: status, exitCode: exitCode))
+        }
+    }
+
+    // MARK: - Supersede prior runs
+
+    /// Cancels and removes any existing run on the given destination so a new
+    /// run replaces it rather than stacking. A still-running predecessor is sent
+    /// SIGINT (its own handler tears down the launched app and exits); we wait
+    /// for it to exit before deleting its record so it can't rewrite the file on
+    /// the way out.
+    private func supersedeRuns(onDestination destinationID: String) async {
+        let store = RunStore.shared
+        for record in store.loadAll() where record.destination.id == destinationID {
+            if record.status == .running, let pid = record.pid, pid != ProcessInfo.processInfo.processIdentifier {
+                kill(pid, SIGINT)
+                await waitForExit(pid: pid, timeout: 5)
+            }
+            store.remove(id: record.id)
+        }
+    }
+
+    private func waitForExit(pid: Int32, timeout: Double) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            // kill(pid, 0) fails once the process is gone.
+            if kill(pid, 0) != 0 { return }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    // MARK: - Run record (GUI sync)
+
+    private func startRecord(worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
+        let now = Date().timeIntervalSince1970
+        let newRecord = RunRecord(
+            id: UUID().uuidString,
+            branchName: worktree.branchName,
+            worktreeDisplayName: worktree.displayName,
+            project: worktree.project,
+            scheme: scheme,
+            destination: destination,
+            startedAt: now,
+            updatedAt: now,
+            status: .running,
+            activityText: "Starting",
+            log: "",
+            pid: ProcessInfo.processInfo.processIdentifier
+        )
+        recordLock.lock()
+        record = newRecord
+        lastPersist = Date()
+        recordLock.unlock()
+        try? RunStore.shared.write(newRecord)
+    }
+
+    private func updateRecord(persistNow: Bool, _ mutate: (inout RunRecord) -> Void) {
+        recordLock.lock()
+        guard var current = record else {
+            recordLock.unlock()
+            return
+        }
+        mutate(&current)
+        current.updatedAt = Date().timeIntervalSince1970
+        record = current
+
+        let shouldWrite: Bool
+        if persistNow {
+            shouldWrite = true
+        } else if let last = lastPersist {
+            shouldWrite = Date().timeIntervalSince(last) >= 0.5
+        } else {
+            shouldWrite = true
+        }
+
+        if shouldWrite {
+            lastPersist = Date()
+            let snapshot = current
+            recordLock.unlock()
+            try? RunStore.shared.write(snapshot)
+        } else {
+            recordLock.unlock()
+        }
+    }
+
+    private static func boundedAppend(_ existing: String, _ chunk: String) -> String {
+        let combined = existing + chunk
+        let maxLength = 80_000
+        return combined.count > maxLength ? String(combined.suffix(maxLength)) : combined
+    }
+
+    func emitError(_ message: String) {
+        if json {
+            emitEvent(CLIEvent(type: "error", text: message))
+        } else {
+            writeLine(message, to: .standardError)
+        }
+    }
+
+    private func emitEvent(_ event: CLIEvent) {
+        guard let data = try? CLIEvent.encoder.encode(event),
+              let line = String(data: data, encoding: .utf8) else {
+            return
+        }
+        writeLine(line, to: .standardOutput)
+    }
+
+    private func writeLine(_ text: String, to handle: FileHandle) {
+        write(text + "\n", to: handle)
+    }
+
+    private func write(_ text: String, to handle: FileHandle) {
+        guard let data = text.data(using: .utf8) else { return }
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        handle.write(data)
+    }
+}
+
+/// One NDJSON event emitted on stdout in `--json` mode.
+struct CLIEvent: Encodable {
+    let type: String
+    var stage: String?
+    var text: String?
+    var status: String?
+    var exitCode: Int?
+
+    init(type: String, stage: String? = nil, text: String? = nil, status: String? = nil, exitCode: Int? = nil) {
+        self.type = type
+        self.stage = stage
+        self.text = text
+        self.status = status
+        self.exitCode = exitCode
+    }
+
+    static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return encoder
+    }()
+}

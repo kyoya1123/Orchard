@@ -21,6 +21,11 @@ enum RunJobStatus: Equatable {
     }
 }
 
+enum RunSource {
+    case gui
+    case cli
+}
+
 struct RunJob: Identifiable {
     let id: UUID
     let worktreeDisplayName: String
@@ -32,6 +37,9 @@ struct RunJob: Identifiable {
     var status: RunJobStatus
     var activityText: String
     var logText: String
+    var source: RunSource = .gui
+    // PID of the owning CLI process (CLI jobs only), used to stop it via SIGINT.
+    var cliPID: Int32?
 
     var title: String {
         "\(branchName) · \(scheme)"
@@ -84,7 +92,6 @@ final class RunnerViewModel: ObservableObject {
     @Published var selectedScheme: String?
     @Published var selectedDestinationID: String?
     @Published var favoriteSimulatorDestinationIDs: Set<String> = []
-    @Published var showsAllSimulators = false
     @Published var status = "Idle"
     @Published var jobs: [RunJob] = []
     @Published var selectedJobID: UUID?
@@ -102,10 +109,10 @@ final class RunnerViewModel: ObservableObject {
         let destination: XcodeDestination
     }
 
-    private let configuredDirectoryPathsKey = "configuredDirectoryPaths"
-    private let favoriteSimulatorDestinationIDsKey = "favoriteSimulatorDestinationIDs"
-    private let globalHotKeyKey = "globalHotKey"
-    private let schemeCacheKey = "schemeCache"
+    private let configuredDirectoryPathsKey = AppConfiguration.Keys.configuredDirectoryPaths
+    private let favoriteSimulatorDestinationIDsKey = AppConfiguration.Keys.favoriteSimulatorDestinationIDs
+    private let globalHotKeyKey = AppConfiguration.Keys.globalHotKey
+    private let schemeCacheKey = AppConfiguration.Keys.schemeCache
     private let worktreeContextResolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
     private let globalHotKeyManager = GlobalHotKeyManager()
@@ -113,6 +120,14 @@ final class RunnerViewModel: ObservableObject {
     // Keyed by the project file path: project.id hashes are not stable
     // across launches, and this cache is persisted.
     private var schemeCache: [String: [String]] = [:]
+    // Watches the shared run store so CLI-originated runs appear in the Runs
+    // list. Event-driven (FSEvents) — no idle polling. Kept for the VM's whole
+    // lifetime; only the underlying stream is started/stopped.
+    private var runStoreWatcher: RunStoreWatcher?
+    // Tombstones for CLI runs the user dismissed via Close. A running CLI run
+    // keeps rewriting its record, so without this it would reappear on the next
+    // sync. Entries are forgotten once their record actually leaves the store.
+    private var dismissedCLIRunIDs: Set<UUID> = []
 
     init() {
         configuredDirectoryPaths = UserDefaults.standard.stringArray(forKey: configuredDirectoryPathsKey) ?? []
@@ -165,11 +180,7 @@ final class RunnerViewModel: ObservableObject {
     }
 
     var displayedDestinations: [XcodeDestination] {
-        destinations.filter { destination in
-            destination.kind == .device ||
-            showsAllSimulators ||
-            favoriteSimulatorDestinationIDs.contains(destination.id)
-        }
+        destinations
     }
 
     var deviceDestinations: [XcodeDestination] {
@@ -190,12 +201,6 @@ final class RunnerViewModel: ObservableObject {
 
     var selectedDestinationTitle: String {
         selectedDestination?.displayName ?? "Select"
-    }
-
-    var hiddenSimulatorCount: Int {
-        destinations.filter {
-            $0.kind == .simulator && !favoriteSimulatorDestinationIDs.contains($0.id)
-        }.count
     }
 
     var canToggleSelectedSimulatorFavorite: Bool {
@@ -307,9 +312,92 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
-    func toggleShowsAllSimulators() {
-        showsAllSimulators.toggle()
-        selectedDestinationID = preferredDestinationID(currentID: selectedDestinationID)
+    /// Starts mirroring CLI runs. Called when the menu window opens — there is
+    /// no point watching the run store while nobody is looking at the Runs list,
+    /// so the GUI does no work at all when the popover is closed.
+    func startCLISync() {
+        if runStoreWatcher == nil {
+            let directory = RunStore.shared.prepareDirectory()
+            runStoreWatcher = RunStoreWatcher(directory: directory) { [weak self] in
+                Task { @MainActor in self?.syncCLIRuns() }
+            }
+        }
+        runStoreWatcher?.start()
+
+        // Sync once immediately: FSEvents only reports changes from now on, so
+        // runs that happened while the menu was closed need an initial scan.
+        syncCLIRuns()
+    }
+
+    /// Stops mirroring when the menu window closes.
+    func stopCLISync() {
+        runStoreWatcher?.stop()
+    }
+
+    /// Mirrors CLI-originated runs from the shared `RunStore` into the Runs list.
+    /// GUI-originated jobs (`source == .gui`) are never touched here.
+    ///
+    /// Runs synchronously on the main actor: the store holds a handful of small
+    /// files and FSEvents already coalesces bursts, so reading inline keeps each
+    /// sync atomic and avoids the stale-overwrite race that concurrent loads
+    /// (older scan finishing after a newer one) would introduce.
+    func syncCLIRuns() {
+        let store = RunStore.shared
+        // 24h after finishing, drop the record so the list doesn't grow forever.
+        store.pruneFinished(olderThan: 24 * 60 * 60, now: Date().timeIntervalSince1970)
+        let allRecords = store.loadAll().filter { $0.source == "cli" }
+
+        let onDiskIDs = Set(allRecords.compactMap { UUID(uuidString: $0.id) })
+        // Forget tombstones whose record has actually left the store.
+        dismissedCLIRunIDs.formIntersection(onDiskIDs)
+
+        let records = allRecords.filter { record in
+            guard let id = UUID(uuidString: record.id) else { return false }
+            return !dismissedCLIRunIDs.contains(id)
+        }
+
+        let recordIDs = Set(records.compactMap { UUID(uuidString: $0.id) })
+
+        // Drop CLI jobs whose record was removed (closed or pruned).
+        jobs.removeAll { $0.source == .cli && !recordIDs.contains($0.id) }
+
+        for record in records {
+            guard let id = UUID(uuidString: record.id) else { continue }
+            let status = mapRecordStatus(record.status)
+
+            if let index = jobs.firstIndex(where: { $0.id == id }) {
+                jobs[index].status = status
+                jobs[index].activityText = record.activityText
+                jobs[index].logText = record.log
+                jobs[index].cliPID = record.pid
+            } else {
+                jobs.append(
+                    RunJob(
+                        id: id,
+                        worktreeDisplayName: record.worktreeDisplayName,
+                        branchName: record.branchName,
+                        project: record.toXcodeProject(),
+                        scheme: record.scheme,
+                        destination: record.destination.toXcodeDestination(),
+                        startedAt: Date(timeIntervalSince1970: record.startedAt),
+                        status: status,
+                        activityText: record.activityText,
+                        logText: record.log,
+                        source: .cli,
+                        cliPID: record.pid
+                    )
+                )
+            }
+        }
+    }
+
+    private func mapRecordStatus(_ status: RunRecord.Status) -> RunJobStatus {
+        switch status {
+        case .running: .running
+        case .completed: .completed
+        case .failed: .failed
+        case .stopped: .stopped
+        }
     }
 
     func toggleSelectedSimulatorFavorite() {
@@ -404,7 +492,24 @@ final class RunnerViewModel: ObservableObject {
     }
 
     func stopJob(_ jobID: UUID) {
+        if let job = jobs.first(where: { $0.id == jobID }), job.source == .cli {
+            stopCLIJob(job)
+            return
+        }
         Task { await stop(jobID: jobID) }
+    }
+
+    /// Stops a CLI-originated run by signalling its process. The CLI's SIGINT
+    /// handler tears down the launched app, writes the final `stopped` status to
+    /// the shared record, and exits — so the terminal reflects the stop too, and
+    /// the GUI picks up the `stopped` status via the run-store watcher.
+    private func stopCLIJob(_ job: RunJob) {
+        guard job.isRunning, let pid = job.cliPID else { return }
+
+        if let index = jobs.firstIndex(where: { $0.id == job.id }) {
+            jobs[index].activityText = "Stopping…"
+        }
+        kill(pid, SIGINT)
     }
 
     func closeSelectedJob() {
@@ -414,6 +519,18 @@ final class RunnerViewModel: ObservableObject {
 
     func closeJob(_ jobID: UUID) {
         guard let job = jobs.first(where: { $0.id == jobID }) else { return }
+
+        // Closing a CLI run only stops mirroring it. Tombstone the id so a still
+        // running CLI (which keeps rewriting its record) doesn't reappear on the
+        // next sync; delete the record only once the run has finished.
+        if job.source == .cli {
+            dismissedCLIRunIDs.insert(jobID)
+            if !job.isRunning {
+                RunStore.shared.remove(id: jobID.uuidString)
+            }
+            removeJob(jobID: jobID)
+            return
+        }
 
         if job.isRunning {
             Task {

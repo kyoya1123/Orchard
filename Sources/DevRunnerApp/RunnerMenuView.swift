@@ -39,6 +39,13 @@ struct RunnerMenuView: View {
         .task {
             await model.refresh()
         }
+        .onAppear {
+            // Only mirror CLI runs while the menu is open; no idle polling.
+            model.startCLISync()
+        }
+        .onDisappear {
+            model.stopCLISync()
+        }
         .onChange(of: model.selectedWorktreeID) { _, _ in
             Task { await model.worktreeSelectionChanged() }
         }
@@ -252,24 +259,11 @@ struct RunnerMenuView: View {
                 }
             }
 
-            if model.showsAllSimulators && !model.otherSimulatorDestinations.isEmpty {
+            if !model.otherSimulatorDestinations.isEmpty {
                 Section("More Simulators") {
                     ForEach(model.otherSimulatorDestinations) { destination in
                         destinationButton(destination, systemImage: "macwindow")
                     }
-                }
-            }
-
-            if model.hiddenSimulatorCount > 0 || model.showsAllSimulators {
-                Divider()
-
-                Button {
-                    model.toggleShowsAllSimulators()
-                } label: {
-                    Label(
-                        model.showsAllSimulators ? "Show Less Simulators" : "Show More Simulators",
-                        systemImage: model.showsAllSimulators ? "chevron.up" : "chevron.down"
-                    )
                 }
             }
 
@@ -576,6 +570,13 @@ struct RunnerMenuView: View {
                     .font(.caption)
                     .lineLimit(1)
 
+                if job.source == .cli {
+                    Image(systemName: "terminal")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("CLI から実行")
+                }
+
                 Spacer()
 
                 if let group {
@@ -659,6 +660,7 @@ struct RunnerMenuView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
+            .disabled(job.source == .cli)
             .help("Rerun")
 
             Button {
