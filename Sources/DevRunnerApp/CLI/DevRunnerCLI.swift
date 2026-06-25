@@ -9,7 +9,7 @@ struct DevRunnerCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dev-runner",
         abstract: "Build and run iOS apps from a worktree/scheme/destination, the same flow as the DevRunner menu bar app.",
-        subcommands: [RunCommand.self, ListCommand.self]
+        subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self]
     )
 }
 
@@ -49,6 +49,8 @@ func runDevRunnerCLI(_ arguments: [String]) async {
         case var command as ListSchemes:
             try await command.run()
         case var command as ListDestinations:
+            try await command.run()
+        case var command as RunsCommand:
             try await command.run()
         default:
             var command = parsed

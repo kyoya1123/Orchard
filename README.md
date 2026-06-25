@@ -80,6 +80,11 @@ dev-runner run --branch <branch> --scheme <scheme> --destination <name-or-udid> 
 dev-runner list branches [--dir <path> ...] [--json]
 dev-runner list schemes --branch <branch> [--dir <path> ...] [--json]
 dev-runner list destinations [--device | --simulator] [--json]
+
+# Observe runs (GUI- and CLI-originated)
+dev-runner runs [--json]                # list every recorded run
+dev-runner runs <id> [--json]           # show one run's detail + log
+dev-runner runs <id> --log              # print only that run's log
 ```
 
 Branch, scheme, and destination are fuzzy matched (exact → case-insensitive →
@@ -95,14 +100,23 @@ Output and exit codes (designed for agents):
 - Exit codes: `0` success, `2` not found, `3` ambiguous, `4` build/launch
   failed, `130` interrupted (Ctrl-C, which also terminates the launched app).
 
-CLI runs also appear in the GUI's Runs list. Each `run` writes a `RunRecord`
-to a shared store (`~/Library/Application Support/DevRunner/runs/<id>.json`),
-updating it as the run progresses; the menu bar app polls that store (~every
-1.5s) and mirrors CLI runs as read-only jobs (marked with a terminal icon).
-The CLI itself stays terminal-complete — this store is a one-way side channel
-for GUI visibility, not an IPC dependency, so `run` works whether or not the GUI
-is open. CLI jobs in the GUI can't be stopped/rerun from the UI (the CLI owns
-the process); Close removes the record. Finished records are pruned after 24h.
+Runs are shared both ways through a run store
+(`~/Library/Application Support/DevRunner/runs/<id>.json`), so the GUI and the
+CLI see each other's runs:
+
+- **CLI → GUI**: each `run` writes/updates a `RunRecord` (source `cli`) as it
+  progresses; the menu bar app watches the store with FSEvents (only while the
+  menu is open — no idle polling) and mirrors CLI runs into its Runs list. The
+  CLI stays terminal-complete, so `run` works whether or not the GUI is open.
+  A CLI run records its PID, so the GUI's Stop button signals it (SIGINT); the
+  CLI then tears down the app, writes `stopped`, and exits 130. Rerun from the
+  GUI cancels the CLI run and restarts it as a GUI-managed run.
+- **GUI → CLI**: GUI runs (including reruns) also write records (source `gui`),
+  so an agent can read them with `dev-runner runs` / `dev-runner runs <id> --log`.
+
+One run per destination: starting a run (CLI or GUI) on a destination replaces
+any existing run there. Jobs whose worktree/branch was deleted from disk are
+dropped when the menu opens or refreshes. Finished records are pruned after 24h.
 
 Directory precedence for worktree discovery: `--dir` overrides the
 `DEVRUNNER_DIRS` env var (colon-separated), which overrides the directories the
