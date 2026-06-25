@@ -660,7 +660,6 @@ struct RunnerMenuView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .disabled(job.source == .cli)
             .help("Rerun")
 
             Button {

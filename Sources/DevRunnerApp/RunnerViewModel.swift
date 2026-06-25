@@ -300,6 +300,8 @@ final class RunnerViewModel: ObservableObject {
             } ?? worktrees.first?.id
             selectedDestinationID = preferredDestinationID(currentID: selectedDestinationID)
 
+            removeJobsForDeletedProjects()
+
             try await reloadSchemesForSelectedWorktree()
             if configuredDirectoryPaths.isEmpty {
                 status = "Add a directory to scan"
@@ -334,6 +336,26 @@ final class RunnerViewModel: ObservableObject {
         runStoreWatcher?.stop()
     }
 
+    /// Removes jobs whose project no longer exists on disk — i.e. the worktree
+    /// (or branch) was deleted. Uses on-disk existence rather than the current
+    /// `worktrees` list so a temporarily unscanned-but-present worktree keeps
+    /// its jobs. CLI jobs also have their shared record deleted.
+    private func removeJobsForDeletedProjects() {
+        let missing = jobs.filter { !FileManager.default.fileExists(atPath: $0.project.fileURL.path) }
+        guard !missing.isEmpty else { return }
+
+        // Both CLI and GUI runs have shared records now; drop them either way.
+        for job in missing {
+            RunStore.shared.remove(id: job.id.uuidString)
+        }
+
+        let missingIDs = Set(missing.map(\.id))
+        jobs.removeAll { missingIDs.contains($0.id) }
+        if let selectedJobID, missingIDs.contains(selectedJobID) {
+            self.selectedJobID = jobs.last?.id
+        }
+    }
+
     /// Mirrors CLI-originated runs from the shared `RunStore` into the Runs list.
     /// GUI-originated jobs (`source == .gui`) are never touched here.
     ///
@@ -353,7 +375,14 @@ final class RunnerViewModel: ObservableObject {
 
         let records = allRecords.filter { record in
             guard let id = UUID(uuidString: record.id) else { return false }
-            return !dismissedCLIRunIDs.contains(id)
+            if dismissedCLIRunIDs.contains(id) { return false }
+            // Drop runs whose worktree/project was deleted from disk, and delete
+            // the stale record so it doesn't linger.
+            if !FileManager.default.fileExists(atPath: record.projectFilePath) {
+                store.remove(id: record.id)
+                return false
+            }
+            return true
         }
 
         let recordIDs = Set(records.compactMap { UUID(uuidString: $0.id) })
@@ -388,6 +417,46 @@ final class RunnerViewModel: ObservableObject {
                     )
                 )
             }
+        }
+    }
+
+    // MARK: - GUI run records (agent visibility)
+
+    private var guiRecordLastWrite: [UUID: Date] = [:]
+
+    /// Persists a GUI-managed job to the shared run store (source "gui") so an AI
+    /// agent can read its status/log the same way it reads CLI runs — including
+    /// runs started or rerun from the GUI. Throttled for frequent console
+    /// updates; pass `force` for lifecycle/status changes.
+    private func persistGUIRecord(_ jobID: UUID, force: Bool = false) {
+        guard let job = jobs.first(where: { $0.id == jobID }), job.source == .gui else { return }
+        if !force, let last = guiRecordLastWrite[jobID], Date().timeIntervalSince(last) < 0.5 { return }
+        guiRecordLastWrite[jobID] = Date()
+
+        let record = RunRecord(
+            id: job.id.uuidString,
+            source: "gui",
+            branchName: job.branchName,
+            worktreeDisplayName: job.worktreeDisplayName,
+            project: job.project,
+            scheme: job.scheme,
+            destination: job.destination,
+            startedAt: job.startedAt.timeIntervalSince1970,
+            updatedAt: Date().timeIntervalSince1970,
+            status: recordStatus(job.status),
+            activityText: job.activityText,
+            log: job.logText,
+            pid: nil
+        )
+        try? RunStore.shared.write(record)
+    }
+
+    private func recordStatus(_ status: RunJobStatus) -> RunRecord.Status {
+        switch status {
+        case .running: .running
+        case .completed: .completed
+        case .failed: .failed
+        case .stopped: .stopped
         }
     }
 
@@ -469,6 +538,11 @@ final class RunnerViewModel: ObservableObject {
     func rerunJob(_ jobID: UUID) {
         guard let job = jobs.first(where: { $0.id == jobID }) else { return }
 
+        if job.source == .cli {
+            rerunCLIJob(job)
+            return
+        }
+
         let request = RunRequest(
             replacingJobID: job.id,
             worktreeDisplayName: job.worktreeDisplayName,
@@ -482,6 +556,33 @@ final class RunnerViewModel: ObservableObject {
             if job.isRunning {
                 await stop(jobID: job.id)
             }
+            await startRunReplacingDestination(request)
+        }
+    }
+
+    /// Reruns a CLI-originated job as a GUI-managed run: stop the CLI process if
+    /// it's still running, stop mirroring its record, then start a fresh in-app
+    /// run with the same branch/scheme/destination. The new run is a normal GUI
+    /// job, so stop/rerun work the usual way afterwards. `startRunReplacingDestination`
+    /// also clears any other job on the same destination.
+    private func rerunCLIJob(_ job: RunJob) {
+        if job.isRunning {
+            stopCLIJob(job)
+        }
+        dismissedCLIRunIDs.insert(job.id)
+        RunStore.shared.remove(id: job.id.uuidString)
+        removeJob(jobID: job.id)
+
+        let request = RunRequest(
+            replacingJobID: nil,
+            worktreeDisplayName: job.worktreeDisplayName,
+            branchName: job.branchName,
+            project: job.project,
+            scheme: job.scheme,
+            destination: job.destination
+        )
+
+        Task {
             await startRunReplacingDestination(request)
         }
     }
@@ -535,9 +636,11 @@ final class RunnerViewModel: ObservableObject {
         if job.isRunning {
             Task {
                 await stop(jobID: job.id)
+                RunStore.shared.remove(id: job.id.uuidString)
                 removeJob(jobID: job.id)
             }
         } else {
+            RunStore.shared.remove(id: job.id.uuidString)
             removeJob(jobID: job.id)
         }
     }
@@ -605,6 +708,7 @@ final class RunnerViewModel: ObservableObject {
         selectedJobID = jobID
         runServices[jobID] = service
         status = "Running"
+        persistGUIRecord(jobID, force: true)
 
         let jobLabel = "\(request.branchName) · \(request.scheme) → \(request.destination.name)"
         appendAppLog("\n[\(timestamp())] ▶ \(jobLabel)\n")
@@ -693,6 +797,7 @@ final class RunnerViewModel: ObservableObject {
             jobs[index].status = .stopped
             jobs[index].activityText = "Stopped"
             status = jobs.contains { $0.isRunning } ? "Running" : RunJobStatus.stopped.label
+            persistGUIRecord(jobID, force: true)
         }
 
         appendAppLog("[\(timestamp())] ⏹ \(job.branchName) · \(job.scheme) → \(job.destination.name): stopped\n")
@@ -714,11 +819,13 @@ final class RunnerViewModel: ObservableObject {
         }
         runServices[jobID] = nil
         self.status = jobs.contains { $0.isRunning } ? "Running" : status.label
+        persistGUIRecord(jobID, force: true)
     }
 
     private func removeJob(jobID: UUID) {
         jobs.removeAll { $0.id == jobID }
         runServices[jobID] = nil
+        guiRecordLastWrite[jobID] = nil
 
         if selectedJobID == jobID {
             selectedJobID = jobs.last?.id
@@ -755,12 +862,14 @@ final class RunnerViewModel: ObservableObject {
         if jobs[index].logText.count > maxLength {
             jobs[index].logText = String(jobs[index].logText.suffix(maxLength))
         }
+        persistGUIRecord(jobID)
     }
 
     private func updateActivity(_ text: String, for jobID: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
 
         jobs[index].activityText = text
+        persistGUIRecord(jobID, force: true)
     }
 
     private func preferredDestinationID(currentID: String?) -> String? {
