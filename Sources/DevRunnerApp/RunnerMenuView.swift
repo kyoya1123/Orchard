@@ -6,11 +6,11 @@ struct RunnerMenuView: View {
     @ObservedObject var model: RunnerViewModel
     @State private var isSettingsPresented = false
     @State private var isConsolePresented = false
-    @State private var expandedProjectIDs: Set<String> = []
+    // Worktree sections are expanded by default; this tracks the ones the user
+    // collapsed.
+    @State private var collapsedProjectIDs: Set<String> = []
     @State private var logSearchText = ""
     @State private var consoleSearchText = ""
-
-    private let jobCardWidth: CGFloat = 206
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -463,110 +463,135 @@ struct RunnerMenuView: View {
                     Spacer()
                 }
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 6) {
                         ForEach(model.jobGroups) { group in
-                            jobGroupView(group)
+                            worktreeSection(group)
                         }
                     }
                     .padding(.vertical, 2)
-                    .animation(.easeOut(duration: 0.18), value: expandedProjectIDs)
+                    .animation(.easeOut(duration: 0.15), value: collapsedProjectIDs)
                 }
+                .frame(maxHeight: 260)
             }
         }
     }
 
-    @ViewBuilder
-    private func jobGroupView(_ group: RunJobGroup) -> some View {
-        if group.jobs.count == 1 {
-            jobCard(group.jobs[0], group: nil)
-        } else if expandedProjectIDs.contains(group.id) {
-            HStack(spacing: 6) {
+    private func worktreeSection(_ group: RunJobGroup) -> some View {
+        let collapsed = collapsedProjectIDs.contains(group.id)
+        let accent = accentColor(for: group)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            sectionHeader(group, collapsed: collapsed, accent: accent)
+
+            if !collapsed {
                 ForEach(group.jobs) { job in
-                    jobCard(job, group: group)
+                    jobRow(job, accent: accent)
                 }
-
-                collapseButton(for: group)
             }
-            // Hug the cards' height; otherwise the infinity-height collapse
-            // button stretches the group to the scroll view's full height.
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(Color.primary.opacity(0.05))
-            )
-        } else {
-            collapsedJobStack(group)
         }
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .overlay(alignment: .leading) {
+            // Per-worktree accent stripe so groups are visually distinct.
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(accent)
+                .frame(width: 3)
+                .padding(.vertical, 5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func collapsedJobStack(_ group: RunJobGroup) -> some View {
-        let front = frontJob(in: group)
-        let back = backJobs(in: group).prefix(2)
+    private func sectionHeader(_ group: RunJobGroup, collapsed: Bool, accent: Color) -> some View {
+        let rep = group.jobs[0]
 
-        return ZStack(alignment: .leading) {
-            ForEach(Array(back.enumerated().reversed()), id: \.element.id) { index, job in
-                let depth = CGFloat(index + 1)
+        return HStack(spacing: 6) {
+            Button {
+                toggleCollapse(group.id)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
 
-                jobCard(job, group: nil)
-                    // Dim the card while keeping it opaque so the front card
-                    // never shows back-card content through itself.
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .fill(Color(nsColor: .windowBackgroundColor).opacity(0.6))
-                    )
-                    .scaleEffect(x: 1, y: 1 - depth * 0.08, anchor: .center)
-                    .offset(x: depth * 9)
-                    .allowsHitTesting(false)
-            }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(rep.branchName)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
 
-            jobCard(front, group: group) {
-                expandedProjectIDs.insert(group.id)
-                model.selectedJobID = front.id
-            }
-            .shadow(color: .black.opacity(0.3), radius: 3, x: 2, y: 0)
-        }
-        .padding(.trailing, CGFloat(back.count) * 9)
-    }
+                        Text(rep.project.rootURL.lastPathComponent)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
 
-    private func collapseButton(for group: RunJobGroup) -> some View {
-        Button {
-            expandedProjectIDs.remove(group.id)
-        } label: {
-            Image(systemName: "chevron.compact.left")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-                .frame(maxHeight: .infinity)
+                    Spacer(minLength: 0)
+                }
                 .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if collapsed {
+                aggregateBadge(group)
+            }
+
+            runOnDestinationMenu(for: rep)
         }
-        .buttonStyle(.borderless)
-        .help("Collapse runs for this project")
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
     }
 
-    private func frontJob(in group: RunJobGroup) -> RunJob {
-        if let selected = model.selectedJob,
-           group.jobs.contains(where: { $0.id == selected.id }) {
-            return selected
+    /// Per-worktree action: pick a destination and run the same worktree/scheme
+    /// on it. Replaces any run already on the chosen destination.
+    private func runOnDestinationMenu(for job: RunJob) -> some View {
+        Menu {
+            if model.destinations.isEmpty {
+                Text("No destinations")
+            } else {
+                ForEach(model.destinations) { destination in
+                    Button {
+                        model.runOnDestination(like: job, destination: destination)
+                    } label: {
+                        Label(destination.displayName, systemImage: destination.symbolName)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "plus.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-
-        return group.jobs.last ?? group.jobs[0]
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("同じ worktree を別の destination で実行")
     }
 
-    private func backJobs(in group: RunJobGroup) -> [RunJob] {
-        let frontID = frontJob(in: group).id
-        return group.jobs.filter { $0.id != frontID }
+    private func aggregateBadge(_ group: RunJobGroup) -> some View {
+        let status = aggregateStatus(group)
+        return HStack(spacing: 4) {
+            Image(systemName: statusIcon(for: status))
+                .foregroundStyle(statusColor(for: status))
+            Text("\(group.jobs.count)")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2)
     }
 
-    private func jobCard(
-        _ job: RunJob,
-        group: RunJobGroup?,
-        onTap: (() -> Void)? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+    private func jobRow(_ job: RunJob, accent: Color) -> some View {
+        let selected = model.selectedJob?.id == job.id
+
+        return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(job.tabTitle)
+                Image(systemName: statusIcon(for: job.status))
+                    .foregroundStyle(statusColor(for: job.status))
+                    .font(.caption)
+
+                Text("\(job.scheme)  ·  \(job.destination.name)")
                     .font(.caption)
                     .lineLimit(1)
 
@@ -579,68 +604,26 @@ struct RunnerMenuView: View {
 
                 Spacer()
 
-                if let group {
-                    stackBadge(for: group)
-                }
-
                 jobActions(for: job)
             }
 
-            Text(job.tabSubtitle)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            jobStatusRow(for: job)
-        }
-        .frame(width: jobCardWidth, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            // Opaque base first: the tint colors are translucent and would
-            // otherwise let stacked cards show through in the vibrant window.
-            ZStack {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(tabBackground(for: job))
-            }
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(tabBorderColor(for: job), lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .contentShape(RoundedRectangle(cornerRadius: 7))
-        .onTapGesture {
-            if let onTap {
-                onTap()
-            } else {
-                model.selectedJobID = job.id
+            HStack(spacing: 5) {
+                if job.isRunning {
+                    ProgressView().controlSize(.small)
+                }
+                Text(rowSubtitle(job))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
+        .background(selected ? accent.opacity(0.16) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture { model.selectedJobID = job.id }
         .help(job.displayName)
-    }
-
-    private func stackBadge(for group: RunJobGroup) -> some View {
-        let isExpanded = expandedProjectIDs.contains(group.id)
-
-        return Button {
-            if isExpanded {
-                expandedProjectIDs.remove(group.id)
-            } else {
-                expandedProjectIDs.insert(group.id)
-            }
-        } label: {
-            HStack(spacing: 2) {
-                Image(systemName: "square.stack")
-                Text("\(group.jobs.count)")
-            }
-            .font(.caption2)
-        }
-        .buttonStyle(.borderless)
-        .help(isExpanded ? "Collapse runs for this project" : "Expand runs for this project")
     }
 
     private func jobActions(for job: RunJob) -> some View {
@@ -672,62 +655,54 @@ struct RunnerMenuView: View {
         }
     }
 
-    @ViewBuilder
-    private func jobStatusRow(for job: RunJob) -> some View {
-        HStack(spacing: 5) {
-            if job.isRunning && !job.activityText.isEmpty {
-                ProgressView()
-                    .controlSize(.small)
-
-                Text(job.activityText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else {
-                Image(systemName: jobStatusSystemImage(for: job))
-                    .foregroundStyle(jobStatusColor(for: job))
-
-                Text(jobStatusText(for: job))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(height: 14, alignment: .leading)
-    }
-
-    private func jobStatusText(for job: RunJob) -> String {
-        switch job.status {
-        case .running:
-            "Succeeded"
-        case .completed:
-            "Completed"
-        case .failed:
-            "Failed"
-        case .stopped:
-            "Stopped"
+    private func toggleCollapse(_ id: String) {
+        if collapsedProjectIDs.contains(id) {
+            collapsedProjectIDs.remove(id)
+        } else {
+            collapsedProjectIDs.insert(id)
         }
     }
 
-    private func jobStatusSystemImage(for job: RunJob) -> String {
-        switch job.status {
-        case .running, .completed:
-            "checkmark.circle"
-        case .failed:
-            "xmark.circle"
-        case .stopped:
-            "stop.circle"
+    private func rowSubtitle(_ job: RunJob) -> String {
+        if job.isRunning {
+            return job.activityText.isEmpty ? "Running" : job.activityText
+        }
+        return job.status.label
+    }
+
+    /// Stable color per worktree, derived from its project path (a deterministic
+    /// hash, since Swift's `hashValue` is randomized per launch).
+    private func accentColor(for group: RunJobGroup) -> Color {
+        let key = group.jobs[0].project.fileURL.path
+        var hash: UInt64 = 5381
+        for byte in key.utf8 {
+            hash = (hash &* 33) &+ UInt64(byte)
+        }
+        return Color(hue: Double(hash % 360) / 360.0, saturation: 0.6, brightness: 0.85)
+    }
+
+    private func aggregateStatus(_ group: RunJobGroup) -> RunJobStatus {
+        if group.jobs.contains(where: { $0.status == .running }) { return .running }
+        if group.jobs.contains(where: { $0.status == .failed }) { return .failed }
+        if group.jobs.contains(where: { $0.status == .stopped }) { return .stopped }
+        return .completed
+    }
+
+    private func statusIcon(for status: RunJobStatus) -> String {
+        switch status {
+        case .running: "circle.fill"
+        case .completed: "checkmark.circle.fill"
+        case .failed: "exclamationmark.circle.fill"
+        case .stopped: "stop.circle.fill"
         }
     }
 
-    private func jobStatusColor(for job: RunJob) -> Color {
-        switch job.status {
-        case .running, .completed:
-            .green
-        case .failed:
-            .red
-        case .stopped:
-            .secondary
+    private func statusColor(for status: RunJobStatus) -> Color {
+        switch status {
+        case .running: .blue
+        case .completed: .green
+        case .failed: .red
+        case .stopped: .secondary
         }
     }
 
@@ -835,22 +810,6 @@ struct RunnerMenuView: View {
     private func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    private func tabBackground(for job: RunJob) -> Color {
-        if model.selectedJob?.id == job.id {
-            return Color.accentColor.opacity(0.18)
-        }
-
-        return Color(nsColor: .controlBackgroundColor)
-    }
-
-    private func tabBorderColor(for job: RunJob) -> Color {
-        if model.selectedJob?.id == job.id {
-            return Color.accentColor.opacity(0.75)
-        }
-
-        return Color(nsColor: .separatorColor)
     }
 
     private func selectDirectory() {
