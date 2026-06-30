@@ -41,10 +41,16 @@ public final class BuildRunService: @unchecked Sendable {
         }
     }
 
+    /// - Parameter attachConsole: when `true` (default) the launch attaches to
+    ///   the app's console and blocks until the app exits — the app's lifetime
+    ///   is tied to this process. When `false`, the app is launched detached:
+    ///   it keeps running independently and this method returns right after a
+    ///   successful launch (no console output is captured).
     public func buildAndRun(
         project: XcodeProject,
         scheme: String,
         destination: XcodeDestination,
+        attachConsole: Bool = true,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void = { _ in }
@@ -86,6 +92,7 @@ public final class BuildRunService: @unchecked Sendable {
             try await installAndLaunchOnDevice(
                 app: app,
                 destination: destination,
+                attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog
@@ -94,6 +101,7 @@ public final class BuildRunService: @unchecked Sendable {
             try await installAndLaunchOnSimulator(
                 app: app,
                 destination: destination,
+                attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog
@@ -104,6 +112,7 @@ public final class BuildRunService: @unchecked Sendable {
     private func installAndLaunchOnSimulator(
         app: RunnableApp,
         destination: XcodeDestination,
+        attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void
@@ -127,17 +136,16 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
-        progress("")
+        progress(attachConsole ? "" : "Launching")
+        var launchArguments = ["simctl", "launch", "--terminate-running-process"]
+        if attachConsole {
+            // Streams the app's console and blocks until it exits.
+            launchArguments.append("--console")
+        }
+        launchArguments += [destination.id, app.bundleIdentifier]
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: [
-                "simctl",
-                "launch",
-                "--terminate-running-process",
-                "--console",
-                destination.id,
-                app.bundleIdentifier
-            ],
+            arguments: launchArguments,
             currentDirectoryURL: nil,
             log: consoleLog
         )
@@ -147,6 +155,7 @@ public final class BuildRunService: @unchecked Sendable {
     private func installAndLaunchOnDevice(
         app: RunnableApp,
         destination: XcodeDestination,
+        attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void
@@ -170,21 +179,18 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
-        progress("")
+        progress(attachConsole ? "" : "Launching")
+        var launchArguments = [
+            "devicectl", "device", "--quiet", "process", "launch",
+            "--device", destination.id, "--terminate-existing"
+        ]
+        if attachConsole {
+            launchArguments.append("--console")
+        }
+        launchArguments.append(app.bundleIdentifier)
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: [
-                "devicectl",
-                "device",
-                "--quiet",
-                "process",
-                "launch",
-                "--device",
-                destination.id,
-                "--terminate-existing",
-                "--console",
-                app.bundleIdentifier
-            ],
+            arguments: launchArguments,
             currentDirectoryURL: nil,
             log: consoleLog
         )
