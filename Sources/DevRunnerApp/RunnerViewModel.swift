@@ -530,6 +530,25 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
+    /// Starts a new run for the same worktree/scheme as `job` but on a different
+    /// destination. Used by the per-worktree "run on another destination" button.
+    /// `startRunReplacingDestination` enforces one run per destination, so this
+    /// replaces any existing run already on the chosen destination.
+    func runOnDestination(like job: RunJob, destination: XcodeDestination) {
+        let request = RunRequest(
+            replacingJobID: nil,
+            worktreeDisplayName: job.worktreeDisplayName,
+            branchName: job.branchName,
+            project: job.project,
+            scheme: job.scheme,
+            destination: destination
+        )
+
+        Task {
+            await startRunReplacingDestination(request)
+        }
+    }
+
     func rerunSelectedJob() {
         guard let selectedJob else { return }
         rerunJob(selectedJob.id)
