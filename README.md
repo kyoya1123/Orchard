@@ -74,7 +74,7 @@ the terminal — "build this branch with ProdDebug on iPhone 15" — using the s
 ```bash
 # Build + install + launch (blocks until the launched app exits)
 dev-runner run --branch <branch> --scheme <scheme> --destination <name-or-udid> \
-  [--device | --simulator] [--timeout <seconds>] [--dir <path> ...] [--json]
+  [--device | --simulator] [--detach] [--timeout <seconds>] [--dir <path> ...] [--json]
 
 # Discovery
 dev-runner list branches [--dir <path> ...] [--json]
@@ -91,6 +91,13 @@ Branch, scheme, and destination are fuzzy matched (exact → case-insensitive �
 prefix → substring); a destination UDID matches exactly. Ambiguous input lists
 the candidates so you can narrow it (e.g. pass a worktree path fragment or a
 UDID).
+
+`--detach` launches the app without attaching to its console: the command
+returns right after a successful launch and the app keeps running independently
+(no console output is captured). Without it, `run` attaches via `--console` and
+blocks until the app exits — and stopping that attach terminates the app. Use
+`--detach` when you just want to launch (e.g. an agent that shouldn't keep
+monitoring); omit it when you want to stream logs.
 
 Output and exit codes (designed for agents):
 

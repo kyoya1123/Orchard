@@ -80,7 +80,8 @@ final class CLIEnvironment: @unchecked Sendable {
         scheme: String,
         destination: String,
         kindFilter: XcodeDestination.Kind?,
-        timeout: Int?
+        timeout: Int?,
+        detached: Bool
     ) async throws {
         let worktrees = await worktrees()
         guard !worktrees.isEmpty else {
@@ -131,6 +132,7 @@ final class CLIEnvironment: @unchecked Sendable {
                 project: worktree.project,
                 scheme: resolvedScheme,
                 destination: resolvedDestination,
+                attachConsole: !detached,
                 progress: { self.emitProgress($0) },
                 consoleLog: { self.emitConsole($0) },
                 commandLog: { self.emitCommand($0) }

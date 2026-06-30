@@ -25,6 +25,9 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Stop the run after this many seconds.")
     var timeout: Int?
 
+    @Flag(name: .long, help: "Launch detached: the app keeps running independently and the command returns right after launch (no console attach, no log capture).")
+    var detach = false
+
     @OptionGroup var directories: DirectoryOptions
 
     func validate() throws {
@@ -43,7 +46,8 @@ struct RunCommand: AsyncParsableCommand {
                 scheme: scheme,
                 destination: destination,
                 kindFilter: kindFilter,
-                timeout: timeout
+                timeout: timeout,
+                detached: detach
             )
         } catch let error as SelectionError {
             env.emitError("\(error)")
