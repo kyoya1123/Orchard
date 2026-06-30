@@ -356,8 +356,10 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
-    /// Mirrors CLI-originated runs from the shared `RunStore` into the Runs list.
-    /// GUI-originated jobs (`source == .gui`) are never touched here.
+    /// Reconciles the Runs list with the shared run store. Restores both CLI-
+    /// and GUI-originated runs (so past runs survive an app restart), mirrors
+    /// live CLI runs, and never clobbers a GUI run that this session is actively
+    /// managing in memory.
     ///
     /// Runs synchronously on the main actor: the store holds a handful of small
     /// files and FSEvents already coalesces bursts, so reading inline keeps each
@@ -367,7 +369,7 @@ final class RunnerViewModel: ObservableObject {
         let store = RunStore.shared
         // 24h after finishing, drop the record so the list doesn't grow forever.
         store.pruneFinished(olderThan: 24 * 60 * 60, now: Date().timeIntervalSince1970)
-        let allRecords = store.loadAll().filter { $0.source == "cli" }
+        let allRecords = store.loadAll()
 
         let onDiskIDs = Set(allRecords.compactMap { UUID(uuidString: $0.id) })
         // Forget tombstones whose record has actually left the store.
@@ -387,19 +389,34 @@ final class RunnerViewModel: ObservableObject {
 
         let recordIDs = Set(records.compactMap { UUID(uuidString: $0.id) })
 
-        // Drop CLI jobs whose record was removed (closed or pruned).
+        // Drop CLI jobs whose record was removed (closed/pruned/dismissed). GUI
+        // jobs are removed at their own call sites (close / deleted worktree),
+        // and a live GUI run might briefly lack a record, so leave those alone.
         jobs.removeAll { $0.source == .cli && !recordIDs.contains($0.id) }
 
         for record in records {
             guard let id = UUID(uuidString: record.id) else { continue }
-            let status = mapRecordStatus(record.status)
+            let recordSource: RunSource = record.source == "gui" ? .gui : .cli
 
             if let index = jobs.firstIndex(where: { $0.id == id }) {
-                jobs[index].status = status
-                jobs[index].activityText = record.activityText
-                jobs[index].logText = record.log
-                jobs[index].cliPID = record.pid
+                // Mirror live CLI runs; never overwrite an in-memory GUI run
+                // (its in-process state is authoritative and can be ahead of the
+                // throttled record).
+                if jobs[index].source == .cli {
+                    jobs[index].status = mapRecordStatus(record.status)
+                    jobs[index].activityText = record.activityText
+                    jobs[index].logText = record.log
+                    jobs[index].cliPID = record.pid
+                }
             } else {
+                // A GUI run being added here is a restore from a previous session
+                // (a live one would already be in `jobs`). If its record still
+                // says "running", the owning process is gone — show it as stopped.
+                var status = mapRecordStatus(record.status)
+                if recordSource == .gui && status == .running {
+                    status = .stopped
+                }
+
                 jobs.append(
                     RunJob(
                         id: id,
@@ -412,7 +429,7 @@ final class RunnerViewModel: ObservableObject {
                         status: status,
                         activityText: record.activityText,
                         logText: record.log,
-                        source: .cli,
+                        source: recordSource,
                         cliPID: record.pid
                     )
                 )
