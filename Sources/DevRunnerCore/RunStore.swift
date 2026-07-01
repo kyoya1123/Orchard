@@ -64,6 +64,43 @@ public struct RunStore: Sendable {
         try? FileManager.default.removeItem(at: fileURL(for: id))
     }
 
+    // MARK: - Run requests (CLI → GUI delegation)
+
+    public var requestsDirectoryURL: URL {
+        directoryURL.deletingLastPathComponent().appendingPathComponent("requests", isDirectory: true)
+    }
+
+    @discardableResult
+    public func prepareRequestsDirectory() -> URL {
+        try? FileManager.default.createDirectory(at: requestsDirectoryURL, withIntermediateDirectories: true)
+        return requestsDirectoryURL
+    }
+
+    public func writeRequest(_ payload: RunRequestPayload) throws {
+        prepareRequestsDirectory()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let data = try encoder.encode(payload)
+        try data.write(to: requestsDirectoryURL.appendingPathComponent("\(payload.id).json"), options: .atomic)
+    }
+
+    public func loadRequests() -> [RunRequestPayload] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: requestsDirectoryURL,
+            includingPropertiesForKeys: nil
+        ) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        return urls
+            .filter { $0.pathExtension == "json" }
+            .compactMap { url in (try? Data(contentsOf: url)).flatMap { try? decoder.decode(RunRequestPayload.self, from: $0) } }
+    }
+
+    public func removeRequest(id: String) {
+        try? FileManager.default.removeItem(at: requestsDirectoryURL.appendingPathComponent("\(id).json"))
+    }
+
     /// Deletes finished records whose last update is older than `seconds`.
     /// Running records are never pruned. `now` is injected (epoch seconds)
     /// because callers already have a timestamp and it keeps this testable.

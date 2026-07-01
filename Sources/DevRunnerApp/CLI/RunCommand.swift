@@ -22,11 +22,11 @@ struct RunCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Only match simulators.")
     var simulator = false
 
-    @Option(name: .long, help: "Stop the run after this many seconds.")
+    @Option(name: .long, help: "Stop the run after this many seconds (only with --follow).")
     var timeout: Int?
 
-    @Flag(name: .long, help: "Launch detached: the app keeps running independently and the command returns right after launch (no console attach, no log capture).")
-    var detach = false
+    @Flag(name: .long, help: "Run attached in this terminal: stream the app's console here and block until it exits. Default delegates to the DevRunner app and returns immediately.")
+    var follow = false
 
     @OptionGroup var directories: DirectoryOptions
 
@@ -41,14 +41,29 @@ struct RunCommand: AsyncParsableCommand {
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
 
         do {
-            try await env.performRun(
-                branch: branch,
-                scheme: scheme,
-                destination: destination,
-                kindFilter: kindFilter,
-                timeout: timeout,
-                detached: detach
-            )
+            if follow {
+                // Attached: build/run here, streaming console; logs are also
+                // recorded so the GUI shows them.
+                try await env.performRun(
+                    branch: branch,
+                    scheme: scheme,
+                    destination: destination,
+                    kindFilter: kindFilter,
+                    timeout: timeout,
+                    detached: false
+                )
+            } else {
+                // Default: hand the run to the GUI app and return immediately.
+                // The GUI runs it, keeps the app alive, and shows the logs.
+                let run = try await env.delegateRun(
+                    branch: branch,
+                    scheme: scheme,
+                    destination: destination,
+                    kindFilter: kindFilter
+                )
+                env.emitProgress("Delegated to DevRunner: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName)")
+                env.emitResult(status: "delegated", exitCode: 0)
+            }
         } catch let error as SelectionError {
             env.emitError("\(error)")
             switch error {
