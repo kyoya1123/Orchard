@@ -73,16 +73,16 @@ final class CLIEnvironment: @unchecked Sendable {
         try await xcodeService.destinations()
     }
 
-    // MARK: - Run
+    // MARK: - Resolution
 
-    func performRun(
+    /// Resolves the typed names to concrete worktree/scheme/destination.
+    /// Throws SelectionError (not found / ambiguous) or BuildFailure (lookup).
+    func resolveRun(
         branch: String,
         scheme: String,
         destination: String,
-        kindFilter: XcodeDestination.Kind?,
-        timeout: Int?,
-        detached: Bool
-    ) async throws {
+        kindFilter: XcodeDestination.Kind?
+    ) async throws -> (worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
         let worktrees = await worktrees()
         guard !worktrees.isEmpty else {
             throw SelectionError.notFound(kind: "branch", query: branch, available: [])
@@ -108,6 +108,68 @@ final class CLIEnvironment: @unchecked Sendable {
             kind: kindFilter,
             in: destinationList
         ).get()
+
+        return (worktree, resolvedScheme, resolvedDestination)
+    }
+
+    /// Default run path: hand a resolved request to the GUI app, which runs it
+    /// (console attached, logs recorded and shown) while this command returns
+    /// immediately. Ensures the GUI is running. Returns the request id.
+    func delegateRun(
+        branch: String,
+        scheme: String,
+        destination: String,
+        kindFilter: XcodeDestination.Kind?
+    ) async throws -> (id: String, worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
+        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter)
+
+        let id = UUID().uuidString
+        let payload = RunRequestPayload(
+            id: id,
+            branchName: resolved.worktree.branchName,
+            worktreeDisplayName: resolved.worktree.displayName,
+            project: resolved.worktree.project,
+            scheme: resolved.scheme,
+            destination: resolved.destination
+        )
+        do {
+            try RunStore.shared.writeRequest(payload)
+        } catch {
+            throw BuildFailure(message: "Failed to write run request: \(error)")
+        }
+        ensureGUIRunning()
+        return (id, resolved.worktree, resolved.scheme, resolved.destination)
+    }
+
+    /// Launches the DevRunner GUI (no-op if already running) so it can pick up
+    /// the delegated request. Derives the .app bundle from this binary's path.
+    private func ensureGUIRunning() {
+        let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments.first ?? "")
+            .resolvingSymlinksInPath()
+        // .../DevRunner.app/Contents/MacOS/dev-runner → .../DevRunner.app
+        let appURL = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        guard appURL.pathExtension == "app" else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-g", appURL.path]
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    // MARK: - Run (attached, --follow)
+
+    func performRun(
+        branch: String,
+        scheme: String,
+        destination: String,
+        kindFilter: XcodeDestination.Kind?,
+        timeout: Int?,
+        detached: Bool
+    ) async throws {
+        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter)
+        let worktree = resolved.worktree
+        let resolvedScheme = resolved.scheme
+        let resolvedDestination = resolved.destination
 
         // One run per destination: cancel and drop any existing run on this same
         // destination so re-running the same branch/scheme/destination replaces

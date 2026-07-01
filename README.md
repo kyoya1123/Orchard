@@ -74,7 +74,7 @@ the terminal — "build this branch with ProdDebug on iPhone 15" — using the s
 ```bash
 # Build + install + launch (blocks until the launched app exits)
 dev-runner run --branch <branch> --scheme <scheme> --destination <name-or-udid> \
-  [--device | --simulator] [--detach] [--timeout <seconds>] [--dir <path> ...] [--json]
+  [--device | --simulator] [--follow] [--timeout <seconds>] [--dir <path> ...] [--json]
 
 # Discovery
 dev-runner list branches [--dir <path> ...] [--json]
@@ -92,12 +92,19 @@ prefix → substring); a destination UDID matches exactly. Ambiguous input lists
 the candidates so you can narrow it (e.g. pass a worktree path fragment or a
 UDID).
 
-`--detach` launches the app without attaching to its console: the command
-returns right after a successful launch and the app keeps running independently
-(no console output is captured). Without it, `run` attaches via `--console` and
-blocks until the app exits — and stopping that attach terminates the app. Use
-`--detach` when you just want to launch (e.g. an agent that shouldn't keep
-monitoring); omit it when you want to stream logs.
+By default `run` **delegates to the DevRunner app**: it resolves the
+worktree/scheme/destination, writes a request, makes sure the app is running,
+and returns immediately. The GUI then builds/launches the run in-process,
+holds the console, records the logs, and shows it in the Runs list — so an
+agent isn't left monitoring, the launched app's lifetime is tied to the
+long-running GUI (not to the CLI), and the logs are always visible in the GUI
+(and via `dev-runner runs <id> --log`). Exit code reflects delegation
+(`0` delegated, `2` not found, `3` ambiguous).
+
+Pass `--follow` to instead run attached in the terminal: the CLI builds and
+launches, streams the app's console to stdout, and blocks until the app exits
+(logs are also recorded for the GUI). Use it when you want to watch the logs
+live.
 
 Output and exit codes (designed for agents):
 

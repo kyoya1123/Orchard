@@ -124,6 +124,10 @@ final class RunnerViewModel: ObservableObject {
     // list. Event-driven (FSEvents) — no idle polling. Kept for the VM's whole
     // lifetime; only the underlying stream is started/stopped.
     private var runStoreWatcher: RunStoreWatcher?
+    // Always-on watcher for CLI-delegated run requests. Unlike runStoreWatcher
+    // (only while the menu is open), this runs for the app's whole life so the
+    // GUI executes delegated runs even when the popover is closed.
+    private var requestWatcher: RunStoreWatcher?
     // Tombstones for CLI runs the user dismissed via Close. A running CLI run
     // keeps rewriting its record, so without this it would reappear on the next
     // sync. Entries are forgotten once their record actually leaves the store.
@@ -143,6 +147,42 @@ final class RunnerViewModel: ObservableObject {
         applyGlobalHotKey()
 
         schemeCache = UserDefaults.standard.dictionary(forKey: schemeCacheKey) as? [String: [String]] ?? [:]
+
+        startRequestWatcher()
+    }
+
+    /// Watches for CLI-delegated run requests and executes them as GUI runs.
+    /// Always on (not gated on menu visibility) so delegation works whenever the
+    /// app is alive.
+    private func startRequestWatcher() {
+        let directory = RunStore.shared.prepareRequestsDirectory()
+        requestWatcher = RunStoreWatcher(directory: directory) { [weak self] in
+            Task { @MainActor in self?.processRunRequests() }
+        }
+        requestWatcher?.start()
+        // Handle any requests that arrived before the watcher started.
+        Task { @MainActor in processRunRequests() }
+    }
+
+    /// Executes each pending delegated request as a GUI-managed run (in-process,
+    /// console attached, recorded, shown in the Runs list). The request file is
+    /// claimed (deleted) before starting so it isn't run twice.
+    private func processRunRequests() {
+        let store = RunStore.shared
+        for payload in store.loadRequests() {
+            store.removeRequest(id: payload.id)
+            guard let id = UUID(uuidString: payload.id) else { continue }
+
+            let request = RunRequest(
+                replacingJobID: id,
+                worktreeDisplayName: payload.worktreeDisplayName,
+                branchName: payload.branchName,
+                project: payload.toXcodeProject(),
+                scheme: payload.scheme,
+                destination: payload.destination.toXcodeDestination()
+            )
+            Task { await startRunReplacingDestination(request) }
+        }
     }
 
     var isRunning: Bool {
