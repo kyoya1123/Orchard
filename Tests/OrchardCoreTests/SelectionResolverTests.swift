@@ -1,4 +1,4 @@
-import DevRunnerCore
+import OrchardCore
 import Foundation
 import XCTest
 

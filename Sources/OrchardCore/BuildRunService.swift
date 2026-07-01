@@ -83,7 +83,7 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         guard let app = settings.firstRunnableApp else {
-            throw DevRunnerError.message("ビルド成果物の .app と bundle identifier を特定できませんでした。")
+            throw OrchardError.message("ビルド成果物の .app と bundle identifier を特定できませんでした。")
         }
         launchedApp = app
 
@@ -254,7 +254,7 @@ public final class BuildRunService: @unchecked Sendable {
     ) async throws -> URL {
         let outputURL = FileManager.default
             .temporaryDirectory
-            .appendingPathComponent("DevRunnerDeviceApps-\(UUID().uuidString).json")
+            .appendingPathComponent("OrchardDeviceApps-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: outputURL) }
 
         _ = try await ProcessRunner.run(
@@ -278,7 +278,7 @@ public final class BuildRunService: @unchecked Sendable {
 
         guard let app = response.result.apps.first(where: { $0.bundleIdentifier == bundleIdentifier }),
               let url = URL(string: app.url) else {
-            throw DevRunnerError.message("実機上のアプリ \(bundleIdentifier) を特定できませんでした。")
+            throw OrchardError.message("実機上のアプリ \(bundleIdentifier) を特定できませんでした。")
         }
 
         return url
@@ -290,7 +290,7 @@ public final class BuildRunService: @unchecked Sendable {
     ) async throws -> [Int] {
         let outputURL = FileManager.default
             .temporaryDirectory
-            .appendingPathComponent("DevRunnerDeviceProcesses-\(UUID().uuidString).json")
+            .appendingPathComponent("OrchardDeviceProcesses-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: outputURL) }
 
         _ = try await ProcessRunner.run(
@@ -361,7 +361,7 @@ public final class BuildRunService: @unchecked Sendable {
                     continuation.resume()
                 } else {
                     continuation.resume(
-                        throwing: DevRunnerError.message("Command failed with exit code \(process.terminationStatus).")
+                        throwing: OrchardError.message("Command failed with exit code \(process.terminationStatus).")
                     )
                 }
             }
@@ -381,7 +381,7 @@ public final class BuildRunService: @unchecked Sendable {
 
     private func throwIfStopped() throws {
         if shouldStop {
-            throw DevRunnerError.message("Stopped.")
+            throw OrchardError.message("Stopped.")
         }
     }
 }

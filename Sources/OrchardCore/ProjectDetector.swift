@@ -23,7 +23,7 @@ public struct ProjectDetector: Sendable {
             currentURL = parent
         }
 
-        throw DevRunnerError.message("作業ディレクトリの親階層に .xcworkspace / .xcodeproj が見つかりませんでした。")
+        throw OrchardError.message("作業ディレクトリの親階層に .xcworkspace / .xcodeproj が見つかりませんでした。")
     }
 
     private func firstMatch(in directoryURL: URL, extensionName: String) throws -> URL? {

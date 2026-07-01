@@ -46,7 +46,7 @@ public struct GhosttyContextProvider: TerminalContextProvider {
             .compactMap(parseContextLine)
 
         guard !contexts.isEmpty else {
-            throw DevRunnerError.message("Ghostty の terminal 一覧から作業ディレクトリを取得できませんでした。")
+            throw OrchardError.message("Ghostty の terminal 一覧から作業ディレクトリを取得できませんでした。")
         }
 
         return contexts.sorted { lhs, rhs in

@@ -1,13 +1,13 @@
 import Foundation
 
-/// Single source of truth for where DevRunner persists its settings and under
+/// Single source of truth for where Orchard persists its settings and under
 /// which keys. The GUI writes through `UserDefaults.standard` (whose domain is
 /// the app's bundle id when launched as a bundle), while the CLI — which runs
 /// as a bare binary with no bundle id — must address the same plist explicitly
 /// by suite name. Both paths resolve to
-/// `~/Library/Preferences/dev.codex.DevRunner.plist`.
+/// `~/Library/Preferences/dev.codex.Orchard.plist`.
 public enum AppConfiguration {
-    public static let suiteName = "dev.codex.DevRunner"
+    public static let suiteName = "dev.codex.Orchard"
 
     public enum Keys {
         public static let configuredDirectoryPaths = "configuredDirectoryPaths"
@@ -16,7 +16,7 @@ public enum AppConfiguration {
         public static let schemeCache = "schemeCache"
     }
 
-    /// UserDefaults holding DevRunner's settings, resolved correctly whether
+    /// UserDefaults holding Orchard's settings, resolved correctly whether
     /// the caller is the bundled app or a bare CLI binary. When launched from
     /// the bundle, the process's own bundle id already equals `suiteName`, so
     /// `UserDefaults.standard` targets the right domain — and passing that id as

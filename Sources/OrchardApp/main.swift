@@ -1,10 +1,10 @@
 import ArgumentParser
-import DevRunnerCore
+import OrchardCore
 import Foundation
 
 // Single binary, two personalities:
-//   `dev-runner`            → launch the menu bar GUI (unchanged behaviour)
-//   `dev-runner run ...`    → headless CLI, never touches AppKit
+//   `orchard`            → launch the menu bar GUI (unchanged behaviour)
+//   `orchard run ...`    → headless CLI, never touches AppKit
 // The dispatch happens before any SwiftUI/AppKit type is referenced so the CLI
 // path stays a pure command-line tool.
 let cliArguments = Array(CommandLine.arguments.dropFirst())
@@ -16,7 +16,7 @@ let cliSubcommands: Set<String> = ["run", "list", "runs", "help"]
 // …); those must fall through to the GUI rather than abort as a CLI parse error.
 if let first = cliArguments.first,
    cliSubcommands.contains(first) || first == "-h" || first == "--help" {
-    await runDevRunnerCLI(cliArguments)
+    await runOrchardCLI(cliArguments)
 } else {
-    DevRunnerApp.main()
+    OrchardApp.main()
 }

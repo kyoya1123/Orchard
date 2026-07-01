@@ -14,7 +14,7 @@ import Foundation
 final class RunStoreWatcher {
     private let directory: URL
     private let onChange: () -> Void
-    private let queue = DispatchQueue(label: "dev.codex.DevRunner.runstore-watcher")
+    private let queue = DispatchQueue(label: "dev.codex.Orchard.runstore-watcher")
     private var stream: FSEventStreamRef?
 
     init(directory: URL, onChange: @escaping () -> Void) {

@@ -1,5 +1,5 @@
 import ArgumentParser
-import DevRunnerCore
+import OrchardCore
 import Foundation
 
 /// Thrown when the user interrupts a run with Ctrl-C. Surfaced as exit code 130.
@@ -13,7 +13,7 @@ struct BuildFailure: Error, CustomStringConvertible {
 
 /// Shared machinery for the `run` and `list` subcommands: resolves which
 /// directories to scan, fetches worktrees/schemes/destinations via the same
-/// `DevRunnerCore` services the GUI uses, wires build logs to stdout/stderr,
+/// `OrchardCore` services the GUI uses, wires build logs to stdout/stderr,
 /// and manages clean Ctrl-C teardown.
 final class CLIEnvironment: @unchecked Sendable {
     let directoryURLs: [URL]
@@ -39,13 +39,13 @@ final class CLIEnvironment: @unchecked Sendable {
     private var lastPersist: Date?
 
     /// Directory precedence: explicit `--dir` overrides everything, then the
-    /// `DEVRUNNER_DIRS` env var (colon-separated), then the directories the GUI
+    /// `ORCHARD_DIRS` env var (colon-separated), then the directories the GUI
     /// persisted. This lets the CLI work standalone in CI while still sharing
     /// the GUI's configuration on a developer machine.
     init(extraDirectoryPaths: [String], json: Bool) {
         var paths = extraDirectoryPaths
 
-        if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["DEVRUNNER_DIRS"], !envValue.isEmpty {
+        if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["ORCHARD_DIRS"], !envValue.isEmpty {
             paths = envValue.split(separator: ":").map(String.init)
         }
 
@@ -141,12 +141,12 @@ final class CLIEnvironment: @unchecked Sendable {
         return (id, resolved.worktree, resolved.scheme, resolved.destination)
     }
 
-    /// Launches the DevRunner GUI (no-op if already running) so it can pick up
+    /// Launches the Orchard GUI (no-op if already running) so it can pick up
     /// the delegated request. Derives the .app bundle from this binary's path.
     private func ensureGUIRunning() {
         let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments.first ?? "")
             .resolvingSymlinksInPath()
-        // .../DevRunner.app/Contents/MacOS/dev-runner → .../DevRunner.app
+        // .../Orchard.app/Contents/MacOS/orchard → .../Orchard.app
         let appURL = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         guard appURL.pathExtension == "app" else { return }
         let process = Process()

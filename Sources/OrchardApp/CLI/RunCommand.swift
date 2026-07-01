@@ -1,5 +1,5 @@
 import ArgumentParser
-import DevRunnerCore
+import OrchardCore
 
 struct RunCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -25,7 +25,7 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Stop the run after this many seconds (only with --follow).")
     var timeout: Int?
 
-    @Flag(name: .long, help: "Run attached in this terminal: stream the app's console here and block until it exits. Default delegates to the DevRunner app and returns immediately.")
+    @Flag(name: .long, help: "Run attached in this terminal: stream the app's console here and block until it exits. Default delegates to the Orchard app and returns immediately.")
     var follow = false
 
     @OptionGroup var directories: DirectoryOptions
@@ -61,7 +61,7 @@ struct RunCommand: AsyncParsableCommand {
                     destination: destination,
                     kindFilter: kindFilter
                 )
-                env.emitProgress("Delegated to DevRunner: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName)")
+                env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName)")
                 env.emitResult(status: "delegated", exitCode: 0)
             }
         } catch let error as SelectionError {

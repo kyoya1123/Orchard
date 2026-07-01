@@ -1,4 +1,4 @@
-import DevRunnerCore
+import OrchardCore
 import AppKit
 import SwiftUI
 
@@ -53,7 +53,7 @@ struct RunnerMenuView: View {
 
     private var header: some View {
         HStack {
-            Label("DevRunner", systemImage: "play.circle")
+            Label("Orchard", systemImage: "play.circle")
                 .font(.headline)
             Spacer()
             Button {
@@ -62,7 +62,7 @@ struct RunnerMenuView: View {
                 Image(systemName: "terminal")
             }
             .buttonStyle(.borderless)
-            .help("Console (DevRunner and build command output)")
+            .help("Console (Orchard and build command output)")
 
             Button {
                 isSettingsPresented = true
@@ -115,7 +115,7 @@ struct RunnerMenuView: View {
     private var consoleView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("DevRunner events and build/install command output")
+                Text("Orchard events and build/install command output")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -444,7 +444,7 @@ struct RunnerMenuView: View {
                 }
             }
 
-            Text("Opens the DevRunner window from any app.")
+            Text("Opens the Orchard window from any app.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

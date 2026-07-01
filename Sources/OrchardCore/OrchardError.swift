@@ -1,6 +1,6 @@
 import Foundation
 
-public enum DevRunnerError: LocalizedError, Sendable {
+public enum OrchardError: LocalizedError, Sendable {
     case message(String)
 
     public var errorDescription: String? {
