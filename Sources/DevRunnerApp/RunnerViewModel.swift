@@ -827,33 +827,25 @@ final class RunnerViewModel: ObservableObject {
     }
 
     private func startRunReplacingDestination(_ request: RunRequest) async {
-        var request = request
-
-        // Reuse the existing job instead of stacking a new one when the
-        // branch, scheme, and destination all match.
-        if request.replacingJobID == nil,
-           let duplicate = jobs.first(where: {
-               $0.branchName == request.branchName &&
-               $0.scheme == request.scheme &&
-               $0.destination.id == request.destination.id
-           }) {
-            request = RunRequest(
-                replacingJobID: duplicate.id,
-                worktreeDisplayName: request.worktreeDisplayName,
-                branchName: request.branchName,
-                project: request.project,
-                scheme: request.scheme,
-                destination: request.destination
-            )
-        }
-
         let replacingJobID = request.replacingJobID
-        let conflictingJobs = jobs.filter {
-            $0.destination.id == request.destination.id && $0.id != replacingJobID && $0.isRunning
+        let destinationID = request.destination.id
+
+        // One run per destination: evict every other run on the same
+        // destination — any status (completed too), any source — so runs never
+        // stack. Evict in-memory jobs (stopping running ones)...
+        for job in jobs.filter({ $0.destination.id == destinationID && $0.id != replacingJobID }) {
+            await evictJob(job)
         }
 
-        for job in conflictingJobs {
-            await stop(jobID: job.id)
+        // ...and clear any on-disk records on this destination that aren't
+        // loaded as jobs (e.g. a delegated run processed while the menu was
+        // never opened, so syncCLIRuns hasn't populated `jobs`).
+        for record in RunStore.shared.loadAll()
+        where record.destination.id == destinationID && UUID(uuidString: record.id) != replacingJobID {
+            if record.status == .running, let pid = record.pid {
+                kill(pid, SIGINT)
+            }
+            RunStore.shared.remove(id: record.id)
         }
 
         if let replacingJobID, jobs.first(where: { $0.id == replacingJobID })?.isRunning == true {
@@ -861,6 +853,23 @@ final class RunnerViewModel: ObservableObject {
         }
 
         startRun(request)
+    }
+
+    /// Removes a job from the Runs list and the shared store, stopping it first
+    /// if it is still running.
+    private func evictJob(_ job: RunJob) async {
+        if job.isRunning {
+            if job.source == .cli {
+                stopCLIJob(job)
+            } else {
+                await stop(jobID: job.id)
+            }
+        }
+        if job.source == .cli {
+            dismissedCLIRunIDs.insert(job.id)
+        }
+        RunStore.shared.remove(id: job.id.uuidString)
+        removeJob(jobID: job.id)
     }
 
     private func stop(jobID: UUID) async {
