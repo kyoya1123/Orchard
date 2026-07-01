@@ -2,7 +2,7 @@ import Foundation
 
 /// File-based store for `RunRecord`s shared between the CLI and the GUI. Each
 /// run is one `<id>.json` file under
-/// `~/Library/Application Support/DevRunner/runs/`. The CLI writes/updates its
+/// `~/Library/Application Support/Orchard/runs/`. The CLI writes/updates its
 /// file as a run progresses; the GUI polls `loadAll()` to mirror those runs in
 /// its Runs list. Both processes resolve the same user-domain path.
 public struct RunStore: Sendable {
@@ -14,7 +14,7 @@ public struct RunStore: Sendable {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return base
-            .appendingPathComponent("DevRunner", isDirectory: true)
+            .appendingPathComponent("Orchard", isDirectory: true)
             .appendingPathComponent("runs", isDirectory: true)
     }
 

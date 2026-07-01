@@ -1,4 +1,4 @@
-import DevRunnerCore
+import OrchardCore
 import XCTest
 
 final class XcodeBuildSettingsTests: XCTestCase {

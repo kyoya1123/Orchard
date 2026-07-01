@@ -1,5 +1,5 @@
 import ArgumentParser
-import DevRunnerCore
+import OrchardCore
 import Foundation
 
 struct ListCommand: AsyncParsableCommand {

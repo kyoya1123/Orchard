@@ -33,7 +33,7 @@ public struct ProcessRunner: Sendable {
                     guard process.terminationStatus == 0 else {
                         let message = errorOutput.isEmpty ? output : errorOutput
                         continuation.resume(
-                            throwing: DevRunnerError.message(message.trimmingCharacters(in: .whitespacesAndNewlines))
+                            throwing: OrchardError.message(message.trimmingCharacters(in: .whitespacesAndNewlines))
                         )
                         return
                     }

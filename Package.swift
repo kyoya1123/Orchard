@@ -3,28 +3,28 @@
 import PackageDescription
 
 let package = Package(
-    name: "DevRunner",
+    name: "Orchard",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "dev-runner", targets: ["DevRunnerApp"])
+        .executable(name: "orchard", targets: ["OrchardApp"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [
         .executableTarget(
-            name: "DevRunnerApp",
+            name: "OrchardApp",
             dependencies: [
-                "DevRunnerCore",
+                "OrchardCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         ),
-        .target(name: "DevRunnerCore"),
+        .target(name: "OrchardCore"),
         .testTarget(
-            name: "DevRunnerCoreTests",
-            dependencies: ["DevRunnerCore"]
+            name: "OrchardCoreTests",
+            dependencies: ["OrchardCore"]
         )
     ]
 )

@@ -1,7 +1,7 @@
 .build/
 .swiftpm/
 DerivedData/
-DevRunner.app/
+Orchard.app/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 .DS_Store

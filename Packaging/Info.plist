@@ -5,13 +5,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>dev-runner</string>
+    <string>orchard</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.codex.DevRunner</string>
+    <string>dev.codex.Orchard</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>DevRunner</string>
+    <string>Orchard</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -23,6 +23,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>DevRunner reads the focused Ghostty terminal working directory to detect the active project.</string>
+    <string>Orchard reads the focused Ghostty terminal working directory to detect the active project.</string>
 </dict>
 </plist>

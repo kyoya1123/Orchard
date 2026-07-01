@@ -39,7 +39,7 @@ public protocol TerminalContextProvider: Sendable {
 public extension TerminalContextProvider {
     func resolveContext() async throws -> TerminalContext {
         guard let context = try await resolveContexts().first else {
-            throw DevRunnerError.message("\(displayName) から terminal context を取得できませんでした。")
+            throw OrchardError.message("\(displayName) から terminal context を取得できませんでした。")
         }
 
         return context
