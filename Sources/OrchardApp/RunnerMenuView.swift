@@ -447,6 +447,18 @@ struct RunnerMenuView: View {
             Text("Opens the Orchard window from any app.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider()
+
+            Button(role: .destructive) {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quit Orchard", systemImage: "power")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .keyboardShortcut("q", modifiers: .command)
+            .help("Quit Orchard (⌘Q)")
         }
     }
 
