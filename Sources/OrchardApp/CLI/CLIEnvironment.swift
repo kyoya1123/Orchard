@@ -156,7 +156,7 @@ final class CLIEnvironment: @unchecked Sendable {
         process.waitUntilExit()
     }
 
-    // MARK: - Run (attached, --follow)
+    // MARK: - Run (attached; the default, recorded to the shared store)
 
     func performRun(
         branch: String,

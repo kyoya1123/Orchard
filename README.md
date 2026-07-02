@@ -74,7 +74,7 @@ the terminal — "build this branch with ProdDebug on iPhone 15" — using the s
 ```bash
 # Build + install + launch (blocks until the launched app exits)
 orchard run --branch <branch> --scheme <scheme> --destination <name-or-udid> \
-  [--device | --simulator] [--follow] [--timeout <seconds>] [--dir <path> ...] [--json]
+  [--device | --simulator] [--delegate] [--timeout <seconds>] [--dir <path> ...] [--json]
 
 # Discovery
 orchard list branches [--dir <path> ...] [--json]
@@ -92,19 +92,21 @@ prefix → substring); a destination UDID matches exactly. Ambiguous input lists
 the candidates so you can narrow it (e.g. pass a worktree path fragment or a
 UDID).
 
-By default `run` **delegates to the Orchard app**: it resolves the
-worktree/scheme/destination, writes a request, makes sure the app is running,
-and returns immediately. The GUI then builds/launches the run in-process,
-holds the console, records the logs, and shows it in the Runs list — so an
-agent isn't left monitoring, the launched app's lifetime is tied to the
-long-running GUI (not to the CLI), and the logs are always visible in the GUI
-(and via `orchard runs <id> --log`). Exit code reflects delegation
-(`0` delegated, `2` not found, `3` ambiguous).
+By default `run` **runs attached**: the CLI resolves the
+worktree/scheme/destination, builds and launches in-process, streams the app's
+console to stdout, and blocks until the app exits. The logs are also **recorded
+to the shared run store**, so the Orchard app sees this run and can show its
+logs, rerun it, or stop it. Meant to be launched as a background task (the
+agent isn't blocked, but the launched app's lifetime is tied to the CLI
+process). Exit codes: `0` success, `2` not found, `3` ambiguous, `4`
+build/launch failed, `130` interrupted.
 
-Pass `--follow` to instead run attached in the terminal: the CLI builds and
-launches, streams the app's console to stdout, and blocks until the app exits
-(logs are also recorded for the GUI). Use it when you want to watch the logs
-live.
+Pass `--delegate` to instead hand the run to the Orchard app: it writes a
+request, makes sure the app is running, and returns immediately. The GUI then
+builds/launches the run in-process, holds the console, records the logs, and
+shows it in the Runs list — so the launched app's lifetime is tied to the
+long-running GUI (not the CLI). Exit code reflects delegation
+(`0` delegated, `2` not found, `3` ambiguous).
 
 Output and exit codes (designed for agents):
 
