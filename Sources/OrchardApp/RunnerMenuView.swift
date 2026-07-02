@@ -601,11 +601,16 @@ struct RunnerMenuView: View {
     private func jobRow(_ job: RunJob, accent: Color) -> some View {
         let selected = model.selectedJob?.id == job.id
 
+        let isSteadyRunning = job.status == .running && job.activityText.isEmpty
+
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: statusIcon(for: job.status))
-                    .foregroundStyle(statusColor(for: job.status))
-                    .font(.caption)
+                StatusGlyph(
+                    systemName: statusIcon(for: job.status),
+                    color: statusColor(for: job.status),
+                    pulsing: isSteadyRunning
+                )
+                .font(.caption)
 
                 Text("\(job.scheme)  ·  \(job.destination.name)")
                     .font(.caption)
@@ -624,7 +629,7 @@ struct RunnerMenuView: View {
             }
 
             HStack(spacing: 5) {
-                if job.isRunning {
+                if job.isRunning && !job.activityText.isEmpty {
                     ProgressView().controlSize(.small)
                 }
                 Text(rowSubtitle(job))
@@ -867,6 +872,36 @@ struct RunnerMenuView: View {
         if panel.runModal() == .OK {
             panel.urls.forEach(model.addConfiguredDirectory)
             Task { await model.refresh() }
+        }
+    }
+}
+
+/// A status icon that can pulse (fade in/out) to indicate a steady "live"
+/// state, e.g. a run that has finished launching and is now just running.
+private struct StatusGlyph: View {
+    let systemName: String
+    let color: Color
+    let pulsing: Bool
+
+    @State private var animate = false
+
+    var body: some View {
+        Image(systemName: systemName)
+            .foregroundStyle(color)
+            .opacity(pulsing && animate ? 0.35 : 1.0)
+            .onAppear { updateAnimation() }
+            .onChange(of: pulsing) { _, _ in updateAnimation() }
+    }
+
+    private func updateAnimation() {
+        if pulsing {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                animate = true
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                animate = false
+            }
         }
     }
 }
