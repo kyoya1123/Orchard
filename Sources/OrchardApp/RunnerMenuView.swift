@@ -3,9 +3,12 @@ import AppKit
 import SwiftUI
 
 struct RunnerMenuView: View {
+    private enum OnboardingStep { case directories, shortcut }
+
     @ObservedObject var model: RunnerViewModel
     @State private var isSettingsPresented = false
     @State private var isConsolePresented = false
+    @State private var onboardingStep: OnboardingStep = .directories
     // Worktree sections are expanded by default; this tracks the ones the user
     // collapsed.
     @State private var collapsedProjectIDs: Set<String> = []
@@ -17,7 +20,9 @@ struct RunnerMenuView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if isSettingsPresented {
+            if !model.didCompleteOnboarding {
+                onboardingView
+            } else if isSettingsPresented {
                 settingsHeader
                 Divider()
                 settingsView
@@ -86,33 +91,189 @@ struct RunnerMenuView: View {
         }
     }
 
+    // MARK: - Onboarding
+
+    private var onboardingView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            switch onboardingStep {
+            case .directories:
+                onboardingDirectoriesStep
+            case .shortcut:
+                onboardingShortcutStep
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var onboardingDirectoriesStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Welcome to Orchard", systemImage: "play.circle")
+                    .font(.title2)
+                    .bold()
+
+                Text("Orchard scans directories for Xcode projects and Git worktrees so you can build and run any branch. Add a repository or a parent folder to get started.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                selectDirectory()
+            } label: {
+                Label("Add Directory", systemImage: "folder.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            if !model.configuredDirectoryPaths.isEmpty {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.configuredDirectoryPaths, id: \.self) { path in
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder")
+                                    .foregroundStyle(.secondary)
+
+                                Text(path)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Spacer(minLength: 8)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+
+                            if path != model.configuredDirectoryPaths.last {
+                                Divider()
+                                    .padding(.leading, 10)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+            }
+
+            Spacer(minLength: 0)
+
+            Text("1 / 2")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            Button {
+                onboardingStep = .shortcut
+            } label: {
+                Text("Next")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.configuredDirectoryPaths.isEmpty)
+        }
+    }
+
+    private var onboardingShortcutStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Button {
+                    onboardingStep = .directories
+                } label: {
+                    Image(systemName: "chevron.backward")
+                }
+                .buttonStyle(.borderless)
+                .help("Back")
+
+                Text("Global Shortcut")
+                    .font(.headline)
+
+                Spacer()
+            }
+
+            Text("Set a keyboard shortcut to open Orchard from any app. You can change this later in Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                ShortcutRecorderField(hotKey: model.globalHotKey) { hotKey in
+                    model.setGlobalHotKey(hotKey)
+                }
+
+                if model.globalHotKey != nil {
+                    Button("Clear") {
+                        model.setGlobalHotKey(nil)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Text("2 / 2")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            HStack(spacing: 8) {
+                Button {
+                    model.completeOnboarding()
+                } label: {
+                    Text("Skip")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+
+                Button {
+                    model.completeOnboarding()
+                } label: {
+                    Text("Get Started")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+        }
+    }
+
     private var settingsHeader: some View {
-        HStack {
-            Label("Settings", systemImage: "gearshape")
-                .font(.headline)
-            Spacer()
+        HStack(spacing: 8) {
             Button {
                 isSettingsPresented = false
             } label: {
-                Image(systemName: "checkmark")
+                Image(systemName: "chevron.backward")
             }
             .buttonStyle(.borderless)
-            .help("Done")
+            .help("Back")
+
+            Label("Settings", systemImage: "gearshape")
+                .font(.headline)
+
+            Spacer()
         }
     }
 
     private var consoleHeader: some View {
-        HStack {
-            Label("Console", systemImage: "terminal")
-                .font(.headline)
-            Spacer()
+        HStack(spacing: 8) {
             Button {
                 isConsolePresented = false
             } label: {
-                Image(systemName: "checkmark")
+                Image(systemName: "chevron.backward")
             }
             .buttonStyle(.borderless)
-            .help("Done")
+            .help("Back")
+
+            Label("Console", systemImage: "terminal")
+                .font(.headline)
+
+            Spacer()
         }
     }
 
@@ -351,14 +512,14 @@ struct RunnerMenuView: View {
             Label("No Scan Directories", systemImage: "folder.badge.questionmark")
                 .font(.headline)
 
-            Text("Add a repository or parent directory in Settings to discover projects and worktrees.")
+            Text("Add a repository or parent directory to discover projects and worktrees.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             Button {
-                isSettingsPresented = true
+                selectDirectory()
             } label: {
-                Label("Open Settings", systemImage: "gearshape")
+                Label("Add Directory", systemImage: "folder.badge.plus")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

@@ -99,6 +99,7 @@ final class RunnerViewModel: ObservableObject {
     @Published var isRefreshing = false
     @Published var isLoadingSchemes = false
     @Published var appLogText = ""
+    @Published var didCompleteOnboarding: Bool = false
 
     private struct RunRequest {
         let replacingJobID: UUID?
@@ -135,6 +136,15 @@ final class RunnerViewModel: ObservableObject {
 
     init() {
         configuredDirectoryPaths = UserDefaults.standard.stringArray(forKey: configuredDirectoryPathsKey) ?? []
+
+        // 既存ユーザー（すでにディレクトリ設定済み）にはオンボーディングを出さない。
+        // キーが未設定なら、ディレクトリの有無で初回かどうかを判定する。
+        if UserDefaults.standard.object(forKey: AppConfiguration.Keys.onboardingCompleted) != nil {
+            didCompleteOnboarding = UserDefaults.standard.bool(forKey: AppConfiguration.Keys.onboardingCompleted)
+        } else {
+            didCompleteOnboarding = !configuredDirectoryPaths.isEmpty
+        }
+
         favoriteSimulatorDestinationIDs = Set(
             UserDefaults.standard.stringArray(forKey: favoriteSimulatorDestinationIDsKey) ?? []
         )
@@ -291,6 +301,11 @@ final class RunnerViewModel: ObservableObject {
     func removeConfiguredDirectory(_ path: String) {
         configuredDirectoryPaths.removeAll { $0 == path }
         saveConfiguredDirectoryPaths()
+    }
+
+    func completeOnboarding() {
+        didCompleteOnboarding = true
+        UserDefaults.standard.set(true, forKey: AppConfiguration.Keys.onboardingCompleted)
     }
 
     func setGlobalHotKey(_ hotKey: GlobalHotKey?) {
