@@ -113,8 +113,11 @@ Output and exit codes (designed for agents):
 - Build/tool command lines and progress go to **stderr**; the launched app's
   console output goes to **stdout**.
 - `--json` emits NDJSON events on stdout: `{"type":"progress"|"command"|"console"|"result"|"error", ...}`.
-- Exit codes: `0` success, `2` not found, `3` ambiguous, `4` build/launch
-  failed, `130` interrupted (Ctrl-C, which also terminates the launched app).
+- Exit codes: `0` success **or a stop initiated from the GUI** (stop / rerun /
+  supersede send `SIGTERM`; the run tears the app down and exits cleanly as
+  `stopped`, so a background task doesn't see it as a crash), `2` not found,
+  `3` ambiguous, `4` build/launch failed, `130` interrupted (Ctrl-C, which also
+  terminates the launched app).
 
 Runs are shared both ways through a run store
 (`~/Library/Application Support/Orchard/runs/<id>.json`), so the GUI and the
