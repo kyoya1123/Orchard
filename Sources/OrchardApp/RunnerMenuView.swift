@@ -11,6 +11,9 @@ struct RunnerMenuView: View {
     @State private var collapsedProjectIDs: Set<String> = []
     @State private var logSearchText = ""
     @State private var consoleSearchText = ""
+    // Build & Run controls and the Log are collapsible; both default to closed.
+    @State private var isControlsExpanded = false
+    @State private var isLogExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -28,14 +31,15 @@ struct RunnerMenuView: View {
                 if model.configuredDirectoryPaths.isEmpty {
                     emptyDirectoriesView
                 } else {
-                    controls
+                    controlsSection
                     Divider()
                     jobsView
-                    logView
+                    logSection
                 }
             }
         }
         .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
             await model.refresh()
         }
@@ -484,7 +488,7 @@ struct RunnerMenuView: View {
                     .padding(.vertical, 2)
                     .animation(.easeOut(duration: 0.15), value: collapsedProjectIDs)
                 }
-                .frame(maxHeight: 260)
+                .frame(maxHeight: .infinity)
             }
         }
     }
@@ -718,42 +722,72 @@ struct RunnerMenuView: View {
         }
     }
 
-    private var logView: some View {
+    /// Collapsible "Build & Run" controls (project/scheme/destination + run).
+    private var controlsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionDisclosure(title: "Build & Run", isExpanded: $isControlsExpanded)
+            if isControlsExpanded {
+                controls
+            }
+        }
+    }
+
+    /// Collapsible Log section. Copy/Clear and the log body appear only when open.
+    private var logSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Log")
+            HStack(spacing: 8) {
+                sectionDisclosure(title: "Log", isExpanded: $isLogExpanded)
+
+                if isLogExpanded {
+                    Button {
+                        copyToPasteboard(model.logText)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .disabled(model.logText.isEmpty)
+
+                    Button {
+                        model.clearLog()
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                    }
+                    .disabled(model.logText.isEmpty)
+                }
+            }
+
+            if isLogExpanded {
+                searchField(text: $logSearchText, matchCount: logMatchingLines.count)
+
+                ScrollView {
+                    Text(displayedText(for: model.logText, query: logSearchText))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: .infinity)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    /// A tappable disclosure header row (chevron + title) that toggles `isExpanded`.
+    private func sectionDisclosure(title: String, isExpanded: Binding<Bool>) -> some View {
+        Button {
+            isExpanded.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button {
-                    copyToPasteboard(model.logText)
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-                .disabled(model.logText.isEmpty)
-
-                Button {
-                    model.clearLog()
-                } label: {
-                    Label("Clear", systemImage: "trash")
-                }
-                .disabled(model.logText.isEmpty)
+                Spacer(minLength: 0)
             }
-
-            searchField(text: $logSearchText, matchCount: logMatchingLines.count)
-
-            ScrollView {
-                Text(displayedText(for: model.logText, query: logSearchText))
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            .frame(maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private var logMatchingLines: [Substring] {
