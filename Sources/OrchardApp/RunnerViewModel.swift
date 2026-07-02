@@ -475,6 +475,51 @@ final class RunnerViewModel: ObservableObject {
                 )
             }
         }
+
+        reconcileDestinationConflicts()
+    }
+
+    /// Enforces "1 destination = 1 run" across sources. A CLI run can land on a
+    /// destination a GUI run already holds: the CLI removes the on-disk record,
+    /// but the still-live GUI keeps re-persisting its own, so both surface here
+    /// and show as duplicates. Keep the most recently started run on each
+    /// destination and supersede the rest, so a newer CLI run replaces the GUI
+    /// one (and vice versa) instead of stacking.
+    private func reconcileDestinationConflicts() {
+        let groups = Dictionary(grouping: jobs, by: { $0.destination.id })
+        for (_, group) in groups where group.count > 1 {
+            let ordered = group.sorted { $0.startedAt > $1.startedAt }
+            for loser in ordered.dropFirst() {
+                supersedeConflictingJob(loser)
+            }
+        }
+    }
+
+    /// Removes a job that lost the "1 destination = 1 run" contest. The job and
+    /// its record are dropped up front so neither the live run's callbacks nor
+    /// its completion handler can re-persist it; only then is the underlying run
+    /// torn down (SIGTERM for CLI, stop for GUI).
+    private func supersedeConflictingJob(_ loser: RunJob) {
+        let service = runServices[loser.id]
+        let wasRunning = loser.isRunning
+
+        if loser.source == .cli {
+            dismissedCLIRunIDs.insert(loser.id)
+        }
+        removeJob(jobID: loser.id)
+        RunStore.shared.remove(id: loser.id.uuidString)
+
+        guard wasRunning else { return }
+        switch loser.source {
+        case .cli:
+            if let pid = loser.cliPID { kill(pid, SIGTERM) }
+        case .gui:
+            if let service {
+                Task {
+                    await service.stopCompletely(destination: loser.destination) { _ in }
+                }
+            }
+        }
     }
 
     // MARK: - GUI run records (agent visibility)
