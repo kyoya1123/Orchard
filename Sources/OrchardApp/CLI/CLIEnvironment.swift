@@ -23,14 +23,19 @@ final class CLIEnvironment: @unchecked Sendable {
     private let xcodeService = XcodeService()
     private let outputLock = NSLock()
 
-    // Guards `service`, `interrupted`, and `timedOut`, which are touched from
-    // the SIGINT and timeout queues as well as the main run task.
+    // Guards `service`, `interrupted`, `externallyStopped`, and `timedOut`, which
+    // are touched from the signal and timeout queues as well as the main run task.
     private let stateLock = NSLock()
     private var service: BuildRunService?
     private var interrupted = false
+    // Set when the GUI (or a superseding run) asks this run to stop via SIGTERM.
+    // Unlike a Ctrl-C interrupt, this is an intentional user action, so the run
+    // ends cleanly (exit 0) instead of looking like a crash to a background task.
+    private var externallyStopped = false
     private var timedOut = false
     private var activeDestination: XcodeDestination?
     private var signalSource: DispatchSourceSignal?
+    private var termSignalSource: DispatchSourceSignal?
 
     // Shared run record written for GUI visibility. Guarded by recordLock since
     // it is mutated from build callbacks running on arbitrary threads.
@@ -218,8 +223,17 @@ final class CLIEnvironment: @unchecked Sendable {
         } catch {
             timeoutTask?.cancel()
 
-            // SIGINT and timeout both need the launched app torn down, not just
-            // the local xcrun/xcodebuild process that `stop()` killed.
+            // A GUI-initiated stop (or being superseded) is an intentional user
+            // action, not a failure. Tear the launched app down the same way, but
+            // finish as a clean `stopped` with exit 0 so a background task running
+            // this run doesn't treat it as a crash.
+            if isExternallyStopped() {
+                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+                emitResult(status: "stopped", exitCode: 0)
+                return
+            }
+            // SIGINT (Ctrl-C) and timeout both need the launched app torn down,
+            // not just the local xcrun/xcodebuild process that `stop()` killed.
             if isInterrupted() {
                 await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
                 throw InterruptedError()
@@ -247,6 +261,19 @@ final class CLIEnvironment: @unchecked Sendable {
         }
         source.resume()
         signalSource = source
+
+        // SIGTERM = intentional stop from the GUI (stop/replace/rerun) or from a
+        // superseding run. Treated as a clean stop, not an interrupt/crash.
+        signal(SIGTERM, SIG_IGN)
+        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        termSource.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.markExternallyStopped()
+            self.emitProgress("Stopped from Orchard")
+            self.currentService()?.stop()
+        }
+        termSource.resume()
+        termSignalSource = termSource
     }
 
     // MARK: - Synchronized run state
@@ -275,6 +302,18 @@ final class CLIEnvironment: @unchecked Sendable {
         return interrupted
     }
 
+    private func markExternallyStopped() {
+        stateLock.lock()
+        externallyStopped = true
+        stateLock.unlock()
+    }
+
+    private func isExternallyStopped() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return externallyStopped
+    }
+
     private func markTimedOut() {
         stateLock.lock()
         timedOut = true
@@ -291,6 +330,10 @@ final class CLIEnvironment: @unchecked Sendable {
         signalSource?.cancel()
         signalSource = nil
         signal(SIGINT, SIG_DFL)
+
+        termSignalSource?.cancel()
+        termSignalSource = nil
+        signal(SIGTERM, SIG_DFL)
     }
 
     // MARK: - Output
@@ -340,14 +383,14 @@ final class CLIEnvironment: @unchecked Sendable {
 
     /// Cancels and removes any existing run on the given destination so a new
     /// run replaces it rather than stacking. A still-running predecessor is sent
-    /// SIGINT (its own handler tears down the launched app and exits); we wait
-    /// for it to exit before deleting its record so it can't rewrite the file on
-    /// the way out.
+    /// SIGTERM (an intentional replace: its own handler tears down the launched
+    /// app and exits cleanly); we wait for it to exit before deleting its record
+    /// so it can't rewrite the file on the way out.
     private func supersedeRuns(onDestination destinationID: String) async {
         let store = RunStore.shared
         for record in store.loadAll() where record.destination.id == destinationID {
             if record.status == .running, let pid = record.pid, pid != ProcessInfo.processInfo.processIdentifier {
-                kill(pid, SIGINT)
+                kill(pid, SIGTERM)
                 await waitForExit(pid: pid, timeout: 5)
             }
             store.remove(id: record.id)

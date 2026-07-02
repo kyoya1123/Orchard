@@ -676,17 +676,18 @@ final class RunnerViewModel: ObservableObject {
         Task { await stop(jobID: jobID) }
     }
 
-    /// Stops a CLI-originated run by signalling its process. The CLI's SIGINT
-    /// handler tears down the launched app, writes the final `stopped` status to
-    /// the shared record, and exits — so the terminal reflects the stop too, and
-    /// the GUI picks up the `stopped` status via the run-store watcher.
+    /// Stops a CLI-originated run by signalling its process with SIGTERM. This is
+    /// an intentional user stop, so the CLI's SIGTERM handler tears down the
+    /// launched app, writes the final `stopped` status to the shared record, and
+    /// exits cleanly (exit 0) — a background task running that CLI sees a clean
+    /// stop, not a crash. The GUI picks up the `stopped` status via the watcher.
     private func stopCLIJob(_ job: RunJob) {
         guard job.isRunning, let pid = job.cliPID else { return }
 
         if let index = jobs.firstIndex(where: { $0.id == job.id }) {
             jobs[index].activityText = "Stopping…"
         }
-        kill(pid, SIGINT)
+        kill(pid, SIGTERM)
     }
 
     func closeSelectedJob() {
@@ -843,7 +844,7 @@ final class RunnerViewModel: ObservableObject {
         for record in RunStore.shared.loadAll()
         where record.destination.id == destinationID && UUID(uuidString: record.id) != replacingJobID {
             if record.status == .running, let pid = record.pid {
-                kill(pid, SIGINT)
+                kill(pid, SIGTERM)
             }
             RunStore.shared.remove(id: record.id)
         }
