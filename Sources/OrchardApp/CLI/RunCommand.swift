@@ -22,11 +22,11 @@ struct RunCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Only match simulators.")
     var simulator = false
 
-    @Option(name: .long, help: "Stop the run after this many seconds (only with --follow).")
+    @Option(name: .long, help: "Stop the run after this many seconds.")
     var timeout: Int?
 
-    @Flag(name: .long, help: "Run attached in this terminal: stream the app's console here and block until it exits. Default delegates to the Orchard app and returns immediately.")
-    var follow = false
+    @Flag(name: .long, help: "Hand the run to the Orchard app instead of running it here (returns immediately; the GUI builds/launches and shows the logs).")
+    var delegate = false
 
     @OptionGroup var directories: DirectoryOptions
 
@@ -41,20 +41,8 @@ struct RunCommand: AsyncParsableCommand {
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
 
         do {
-            if follow {
-                // Attached: build/run here, streaming console; logs are also
-                // recorded so the GUI shows them.
-                try await env.performRun(
-                    branch: branch,
-                    scheme: scheme,
-                    destination: destination,
-                    kindFilter: kindFilter,
-                    timeout: timeout,
-                    detached: false
-                )
-            } else {
-                // Default: hand the run to the GUI app and return immediately.
-                // The GUI runs it, keeps the app alive, and shows the logs.
+            if delegate {
+                // Opt-in: hand the run to the GUI app and return immediately.
                 let run = try await env.delegateRun(
                     branch: branch,
                     scheme: scheme,
@@ -63,6 +51,19 @@ struct RunCommand: AsyncParsableCommand {
                 )
                 env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName)")
                 env.emitResult(status: "delegated", exitCode: 0)
+            } else {
+                // Default: build/run attached here, streaming console. Logs are
+                // recorded to the shared store, so the Orchard app shows this run
+                // and can view its logs, rerun, or stop it. Meant to be launched
+                // as a background task.
+                try await env.performRun(
+                    branch: branch,
+                    scheme: scheme,
+                    destination: destination,
+                    kindFilter: kindFilter,
+                    timeout: timeout,
+                    detached: false
+                )
             }
         } catch let error as SelectionError {
             env.emitError("\(error)")
