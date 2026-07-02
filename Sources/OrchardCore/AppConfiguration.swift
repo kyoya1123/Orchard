@@ -14,6 +14,7 @@ public enum AppConfiguration {
         public static let favoriteSimulatorDestinationIDs = "favoriteSimulatorDestinationIDs"
         public static let globalHotKey = "globalHotKey"
         public static let schemeCache = "schemeCache"
+        public static let onboardingCompleted = "onboardingCompleted"
     }
 
     /// UserDefaults holding Orchard's settings, resolved correctly whether
