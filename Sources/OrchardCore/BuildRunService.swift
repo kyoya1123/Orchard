@@ -140,7 +140,10 @@ public final class BuildRunService: @unchecked Sendable {
         var launchArguments = ["simctl", "launch", "--terminate-running-process"]
         if attachConsole {
             // Streams the app's console and blocks until it exits.
-            launchArguments.append("--console")
+            // Uses a PTY (line-buffered) instead of a plain pipe so the app's
+            // stdout/print() output is captured; a plain --console pipe is
+            // block-buffered and drops print output.
+            launchArguments.append("--console-pty")
         }
         launchArguments += [destination.id, app.bundleIdentifier]
         try await runStreaming(
@@ -342,12 +345,12 @@ public final class BuildRunService: @unchecked Sendable {
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                log(text)
+                log(text.strippingCarriageReturns())
             }
             errorPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                log(text)
+                log(text.strippingCarriageReturns())
             }
 
             process.terminationHandler = { [weak self] process in
@@ -383,6 +386,21 @@ public final class BuildRunService: @unchecked Sendable {
         if shouldStop {
             throw OrchardError.message("Stopped.")
         }
+    }
+}
+
+private extension String {
+    /// Normalizes PTY-style line endings ("\r\n") to "\n" and drops any
+    /// remaining stray "\r" (e.g. from --console-pty output).
+    ///
+    /// Checked via `unicodeScalars`, not `contains("\r")`: Swift's Character
+    /// (grapheme cluster) view merges "\r\n" into a single Character, so a
+    /// Character-based check for "\r" silently returns false even when a
+    /// literal CR byte is present right before a LF.
+    func strippingCarriageReturns() -> String {
+        guard unicodeScalars.contains(where: { $0 == "\r" }) else { return self }
+        return replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "")
     }
 }
 
