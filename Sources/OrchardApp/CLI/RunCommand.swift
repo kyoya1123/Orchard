@@ -28,6 +28,9 @@ struct RunCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Hand the run to the Orchard app instead of running it here (returns immediately; the GUI builds/launches and shows the logs).")
     var delegate = false
 
+    @Flag(name: .long, help: "Suppress app console output on stdout (still recorded to the run store).")
+    var quiet = false
+
     @OptionGroup var directories: DirectoryOptions
 
     func validate() throws {
@@ -37,7 +40,7 @@ struct RunCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json)
+        let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json, quiet: quiet)
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
 
         do {
