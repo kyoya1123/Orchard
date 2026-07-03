@@ -18,13 +18,15 @@ struct BuildFailure: Error, CustomStringConvertible {
 final class CLIEnvironment: @unchecked Sendable {
     let directoryURLs: [URL]
     let json: Bool
+    let quiet: Bool
 
     private let resolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
     private let outputLock = NSLock()
 
-    // Guards `service`, `interrupted`, `externallyStopped`, and `timedOut`, which
-    // are touched from the signal and timeout queues as well as the main run task.
+    // Guards `service`, `interrupted`, `externallyStopped`, `timedOut`, and
+    // `launchedEmitted`, which are touched from the signal/timeout queues and
+    // the console callback (arbitrary thread) as well as the main run task.
     private let stateLock = NSLock()
     private var service: BuildRunService?
     private var interrupted = false
@@ -33,6 +35,9 @@ final class CLIEnvironment: @unchecked Sendable {
     // ends cleanly (exit 0) instead of looking like a crash to a background task.
     private var externallyStopped = false
     private var timedOut = false
+    // Set once the first console chunk arrives, so `emitConsole` can announce
+    // "Launched" exactly once for callers polling progress instead of stdout.
+    private var launchedEmitted = false
     private var activeDestination: XcodeDestination?
     private var signalSource: DispatchSourceSignal?
     private var termSignalSource: DispatchSourceSignal?
@@ -47,7 +52,7 @@ final class CLIEnvironment: @unchecked Sendable {
     /// `ORCHARD_DIRS` env var (colon-separated), then the directories the GUI
     /// persisted. This lets the CLI work standalone in CI while still sharing
     /// the GUI's configuration on a developer machine.
-    init(extraDirectoryPaths: [String], json: Bool) {
+    init(extraDirectoryPaths: [String], json: Bool, quiet: Bool = false) {
         var paths = extraDirectoryPaths
 
         if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["ORCHARD_DIRS"], !envValue.isEmpty {
@@ -62,6 +67,7 @@ final class CLIEnvironment: @unchecked Sendable {
             URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
         }
         self.json = json
+        self.quiet = quiet
     }
 
     // MARK: - Fetching
@@ -326,6 +332,16 @@ final class CLIEnvironment: @unchecked Sendable {
         return timedOut
     }
 
+    /// Returns true only on the first call, so callers can fire a one-time
+    /// "Launched" signal from `emitConsole`, which runs on arbitrary threads.
+    private func markLaunchedOnce() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !launchedEmitted else { return false }
+        launchedEmitted = true
+        return true
+    }
+
     private func teardownSignalHandler() {
         signalSource?.cancel()
         signalSource = nil
@@ -358,8 +374,12 @@ final class CLIEnvironment: @unchecked Sendable {
     }
 
     func emitConsole(_ chunk: String) {
+        if markLaunchedOnce() {
+            emitProgress("Launched")
+        }
         // Console output can be voluminous; persist throttled.
         updateRecord(persistNow: false) { $0.log = Self.boundedAppend($0.log, chunk) }
+        guard !quiet else { return }
         if json {
             emitEvent(CLIEvent(type: "console", text: chunk))
         } else {
