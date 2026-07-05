@@ -715,6 +715,16 @@ struct RunnerMenuView: View {
                 aggregateBadge(group)
             }
 
+            Button {
+                NSWorkspace.shared.open(rep.project.fileURL)
+            } label: {
+                Image(systemName: "hammer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Xcode で開く")
+
             runOnDestinationMenu(for: rep)
         }
         .padding(.leading, 10)
