@@ -375,7 +375,15 @@ final class CLIEnvironment: @unchecked Sendable {
 
     func emitConsole(_ chunk: String) {
         if markLaunchedOnce() {
-            emitProgress("Launched")
+            // Signal launch success to the skill on stderr, but keep the record
+            // in the steady "running" state (empty activity) so the GUI shows the
+            // pulsing dot instead of a perpetual spinner.
+            updateRecord(persistNow: true) { $0.activityText = "" }
+            if json {
+                emitEvent(CLIEvent(type: "progress", stage: "Launched"))
+            } else {
+                writeLine("Launched", to: .standardError)
+            }
         }
         // Console output can be voluminous; persist throttled.
         updateRecord(persistNow: false) { $0.log = Self.boundedAppend($0.log, chunk) }
