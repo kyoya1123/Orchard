@@ -52,7 +52,7 @@ struct RunCommand: AsyncParsableCommand {
                     destination: destination,
                     kindFilter: kindFilter
                 )
-                env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName)")
+                env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName) · run \(run.id)")
                 env.emitResult(status: "delegated", exitCode: 0)
             } else {
                 // Default: build/run attached here, streaming console. Logs are
