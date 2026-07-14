@@ -109,4 +109,13 @@ public struct RunStore: Sendable {
             remove(id: record.id)
         }
     }
+
+    /// Deletes records whose project file no longer exists on disk — i.e. the
+    /// worktree was deleted. Called on every CLI invocation and GUI sync so
+    /// stale runs never surface anywhere.
+    public func pruneOrphaned() {
+        for record in loadAll() where !FileManager.default.fileExists(atPath: record.projectFilePath) {
+            remove(id: record.id)
+        }
+    }
 }
