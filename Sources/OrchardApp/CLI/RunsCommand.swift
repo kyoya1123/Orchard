@@ -21,6 +21,7 @@ struct RunsCommand: AsyncParsableCommand {
     var json = false
 
     func run() async throws {
+        RunStore.shared.pruneOrphaned()
         let records = RunStore.shared.loadAll().sorted { $0.startedAt > $1.startedAt }
 
         if let id {

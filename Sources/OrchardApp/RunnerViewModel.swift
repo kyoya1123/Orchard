@@ -422,6 +422,9 @@ final class RunnerViewModel: ObservableObject {
     /// (older scan finishing after a newer one) would introduce.
     func syncCLIRuns() {
         let store = RunStore.shared
+        // Purge jobs (any source) whose worktree was deleted, then their records.
+        removeJobsForDeletedProjects()
+        store.pruneOrphaned()
         // 24h after finishing, drop the record so the list doesn't grow forever.
         store.pruneFinished(olderThan: 24 * 60 * 60, now: Date().timeIntervalSince1970)
         let allRecords = store.loadAll()
@@ -432,14 +435,7 @@ final class RunnerViewModel: ObservableObject {
 
         let records = allRecords.filter { record in
             guard let id = UUID(uuidString: record.id) else { return false }
-            if dismissedCLIRunIDs.contains(id) { return false }
-            // Drop runs whose worktree/project was deleted from disk, and delete
-            // the stale record so it doesn't linger.
-            if !FileManager.default.fileExists(atPath: record.projectFilePath) {
-                store.remove(id: record.id)
-                return false
-            }
-            return true
+            return !dismissedCLIRunIDs.contains(id)
         }
 
         let recordIDs = Set(records.compactMap { UUID(uuidString: $0.id) })
