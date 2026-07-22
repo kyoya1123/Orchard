@@ -15,6 +15,7 @@ public enum AppConfiguration {
         public static let globalHotKey = "globalHotKey"
         public static let schemeCache = "schemeCache"
         public static let onboardingCompleted = "onboardingCompleted"
+        public static let simslimExceptCategories = "simslimExceptCategories"
     }
 
     /// UserDefaults holding Orchard's settings, resolved correctly whether
