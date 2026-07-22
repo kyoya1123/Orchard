@@ -58,6 +58,10 @@ public final class BuildRunService: @unchecked Sendable {
         shouldStop = false
         isStopping = false
 
+        let slimTask = destination.kind == .simulator
+            ? SimSlimService.slimTaskIfNeeded(udid: destination.id, log: commandLog)
+            : nil
+
         let buildArguments = project.xcodebuildArguments + [
             "-scheme", scheme,
             "-destination", destination.xcodebuildDestination,
@@ -104,7 +108,8 @@ public final class BuildRunService: @unchecked Sendable {
                 attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
-                commandLog: commandLog
+                commandLog: commandLog,
+                slimTask: slimTask
             )
         }
     }
@@ -115,8 +120,13 @@ public final class BuildRunService: @unchecked Sendable {
         attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
-        commandLog: @Sendable @escaping (String) -> Void
+        commandLog: @Sendable @escaping (String) -> Void,
+        slimTask: Task<Void, Never>?
     ) async throws {
+        if let slimTask {
+            progress("Slimming simulator")
+            await slimTask.value
+        }
         progress("Booting simulator")
         commandLog("$ xcrun simctl boot \(destination.id)\n")
         _ = try? await ProcessRunner.run(
