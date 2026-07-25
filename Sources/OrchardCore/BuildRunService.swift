@@ -136,6 +136,19 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
+        // `simctl boot` only boots the device headlessly: without Simulator.app
+        // running, the app installs and launches with no window on screen.
+        // `-g` keeps the frontmost app focused; a no-op if it is already up.
+        // Simulator.app shows a window for every booted device on launch, so no
+        // device needs to be named here.
+        commandLog("$ open -g -a Simulator\n")
+        _ = try? await ProcessRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/open"),
+            arguments: ["-g", "-a", "Simulator"],
+            currentDirectoryURL: nil
+        )
+        try throwIfStopped()
+
         progress("Installing")
         commandLog("$ xcrun simctl install \(destination.id) \(app.appURL.path)\n")
         try await runStreaming(
