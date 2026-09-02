@@ -31,7 +31,7 @@ Orchard is intentionally repository-agnostic: users configure directories to sca
 
 Each job item has a fixed-height status row.
 
-- While build/install work is in progress, it shows a spinner and text such as `Building`, `Resolving build product`, `Booting simulator`, or `Installing`.
+- While build/install work is in progress, it shows a spinner and text such as `Building`, `Resolving build product`, `Booting simulator`, `Installing`, or `Waiting for device unlock`.
 - Once the app has launched and Orchard is only attached to console output, the progress row no longer shows a spinner.
 - A launched app still counts as a running job because `Stop` should terminate it like Xcode's Stop button.
 - In that state the UI shows `checkmark.circle + Succeeded`.
@@ -56,6 +56,7 @@ Builds are handled by `BuildRunService`.
 - Device install/launch:
   - `xcrun devicectl device --quiet install app --device <id> <app>`
   - `xcrun devicectl device --quiet process launch --device <id> --terminate-existing --console <bundle id>`
+  - A locked device is not a failure: `DeviceLockDetector` classifies the command's output tail, and install/launch retry every 3 seconds (indefinitely) while showing `Waiting for device unlock`. Stop, Ctrl-C, and `--timeout` are the ways out.
 - Stop:
   - Always terminates the launched app, not only the local build process.
   - Simulator stop uses `simctl terminate`.
@@ -134,6 +135,8 @@ Terminal integration code still exists (`TerminalContextProvider`, `GhosttyConte
   - Schemes, destinations, build settings.
 - `Sources/OrchardCore/BuildRunService.swift`
   - Build/install/launch/stop implementation.
+- `Sources/OrchardCore/DeviceLockDetector.swift`
+  - Classifies a failed `devicectl` command's output as "device is locked".
 - `Sources/OrchardCore/XcodeModels.swift`
   - Shared model types.
 - `Sources/OrchardCore/SelectionResolver.swift`

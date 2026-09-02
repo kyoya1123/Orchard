@@ -186,10 +186,8 @@ public final class BuildRunService: @unchecked Sendable {
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void
     ) async throws {
-        progress("Installing")
         commandLog("$ xcrun devicectl device install app --device \(destination.id) \(app.appURL.path)\n")
-        try await runStreaming(
-            executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
+        try await runStreamingWaitingForDeviceUnlock(
             arguments: [
                 "devicectl",
                 "device",
@@ -200,12 +198,13 @@ public final class BuildRunService: @unchecked Sendable {
                 destination.id,
                 app.appURL.path
             ],
-            currentDirectoryURL: nil,
-            log: commandLog
+            phase: "Installing",
+            log: commandLog,
+            progress: progress,
+            commandLog: commandLog
         )
         try throwIfStopped()
 
-        progress(attachConsole ? "" : "Launching")
         var launchArguments = [
             "devicectl", "device", "--quiet", "process", "launch",
             "--device", destination.id, "--terminate-existing"
@@ -214,13 +213,54 @@ public final class BuildRunService: @unchecked Sendable {
             launchArguments.append("--console")
         }
         launchArguments.append(app.bundleIdentifier)
-        try await runStreaming(
-            executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
+        try await runStreamingWaitingForDeviceUnlock(
             arguments: launchArguments,
-            currentDirectoryURL: nil,
-            log: consoleLog
+            phase: attachConsole ? "" : "Launching",
+            log: consoleLog,
+            progress: progress,
+            commandLog: commandLog
         )
         try throwIfStopped()
+    }
+
+    /// Retries indefinitely while the device reports being locked: the user
+    /// unlocking the phone is the only thing that can clear it, and Stop, the
+    /// CLI's Ctrl-C and `--timeout` already provide the ways out.
+    private func runStreamingWaitingForDeviceUnlock(
+        arguments: [String],
+        phase: String,
+        log: @Sendable @escaping (String) -> Void,
+        progress: @Sendable @escaping (String) -> Void,
+        commandLog: @Sendable @escaping (String) -> Void
+    ) async throws {
+        var announcedWait = false
+
+        while true {
+            try throwIfStopped()
+            progress(phase)
+
+            do {
+                try await runStreamingCapturingFailure(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                    arguments: arguments,
+                    currentDirectoryURL: nil,
+                    log: log
+                )
+                return
+            } catch let failure as CommandFailure {
+                guard DeviceLockDetector.isDeviceLockedFailure(failure.outputTail) else {
+                    throw failure.orchardError
+                }
+                try throwIfStopped()
+
+                if !announcedWait {
+                    commandLog("Device is locked. Waiting for unlock...\n")
+                    announcedWait = true
+                }
+                progress("Waiting for device unlock")
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
     }
 
     private func terminateOnSimulator(
@@ -354,6 +394,26 @@ public final class BuildRunService: @unchecked Sendable {
         currentDirectoryURL: URL?,
         log: @Sendable @escaping (String) -> Void
     ) async throws {
+        do {
+            try await runStreamingCapturingFailure(
+                executableURL: executableURL,
+                arguments: arguments,
+                currentDirectoryURL: currentDirectoryURL,
+                log: log
+            )
+        } catch let failure as CommandFailure {
+            throw failure.orchardError
+        }
+    }
+
+    private func runStreamingCapturingFailure(
+        executableURL: URL,
+        arguments: [String],
+        currentDirectoryURL: URL?,
+        log: @Sendable @escaping (String) -> Void
+    ) async throws {
+        let outputTail = OutputTail()
+
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executableURL
@@ -368,12 +428,16 @@ public final class BuildRunService: @unchecked Sendable {
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                log(text.strippingCarriageReturns())
+                let normalized = text.strippingCarriageReturns()
+                outputTail.append(normalized)
+                log(normalized)
             }
             errorPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                log(text.strippingCarriageReturns())
+                let normalized = text.strippingCarriageReturns()
+                outputTail.append(normalized)
+                log(normalized)
             }
 
             process.terminationHandler = { [weak self] process in
@@ -387,7 +451,10 @@ public final class BuildRunService: @unchecked Sendable {
                     continuation.resume()
                 } else {
                     continuation.resume(
-                        throwing: OrchardError.message("Command failed with exit code \(process.terminationStatus).")
+                        throwing: CommandFailure(
+                            exitCode: process.terminationStatus,
+                            outputTail: outputTail.text
+                        )
                     )
                 }
             }
@@ -408,6 +475,39 @@ public final class BuildRunService: @unchecked Sendable {
     private func throwIfStopped() throws {
         if shouldStop {
             throw OrchardError.message("Stopped.")
+        }
+    }
+}
+
+private struct CommandFailure: Error {
+    let exitCode: Int32
+    let outputTail: String
+
+    var orchardError: OrchardError {
+        OrchardError.message("Command failed with exit code \(exitCode).")
+    }
+}
+
+/// Keeps the last `limit` characters of a command's combined output so a
+/// failure can be classified. Both pipe readability handlers write to it from
+/// their own queues, hence the lock.
+private final class OutputTail: @unchecked Sendable {
+    private let limit = 4000
+    private let lock = NSLock()
+    private var buffer = ""
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
+    }
+
+    func append(_ chunk: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        buffer += chunk
+        if buffer.count > limit {
+            buffer = String(buffer.suffix(limit))
         }
     }
 }
