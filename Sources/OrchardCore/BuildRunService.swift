@@ -114,6 +114,43 @@ public final class BuildRunService: @unchecked Sendable {
         }
     }
 
+    /// Xcode 27 replaced Simulator.app with Device Hub, which opens a window
+    /// only for the device named in its URL. Older Xcodes still ship
+    /// Simulator.app, which opens a window for every booted device.
+    /// `-g` keeps the frontmost app focused. Failures are logged but not fatal,
+    /// since the app still runs on the booted device.
+    private func showSimulatorWindow(
+        udid: String,
+        commandLog: @Sendable @escaping (String) -> Void
+    ) async {
+        let openURL = URL(fileURLWithPath: "/usr/bin/open")
+        var attempts: [[String]] = [["-g", "-a", "Simulator"]]
+        if let developerDir = try? await ProcessRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/xcode-select"),
+            arguments: ["-p"],
+            currentDirectoryURL: nil
+        ) {
+            // Resolved from the selected Xcode rather than by bundle id, so a
+            // second installed Xcode's Device Hub isn't picked by LaunchServices.
+            let deviceHub = URL(fileURLWithPath: developerDir)
+                .deletingLastPathComponent()
+                .appendingPathComponent("Applications/DeviceHub.app")
+            if FileManager.default.fileExists(atPath: deviceHub.path) {
+                attempts.insert(["-g", "-a", deviceHub.path, "devices://device/open?id=\(udid)"], at: 0)
+            }
+        }
+
+        for arguments in attempts {
+            commandLog("$ open \(arguments.joined(separator: " "))\n")
+            do {
+                _ = try await ProcessRunner.run(executableURL: openURL, arguments: arguments, currentDirectoryURL: nil)
+                return
+            } catch {
+                commandLog("\(error.localizedDescription)\n")
+            }
+        }
+    }
+
     private func installAndLaunchOnSimulator(
         app: RunnableApp,
         destination: XcodeDestination,
@@ -136,17 +173,9 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
-        // `simctl boot` only boots the device headlessly: without Simulator.app
-        // running, the app installs and launches with no window on screen.
-        // `-g` keeps the frontmost app focused; a no-op if it is already up.
-        // Simulator.app shows a window for every booted device on launch, so no
-        // device needs to be named here.
-        commandLog("$ open -g -a Simulator\n")
-        _ = try? await ProcessRunner.run(
-            executableURL: URL(fileURLWithPath: "/usr/bin/open"),
-            arguments: ["-g", "-a", "Simulator"],
-            currentDirectoryURL: nil
-        )
+        // `simctl boot` only boots the device headlessly, so the app would
+        // install and launch with no window on screen.
+        await showSimulatorWindow(udid: destination.id, commandLog: commandLog)
         try throwIfStopped()
 
         progress("Installing")
