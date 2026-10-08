@@ -159,6 +159,7 @@ final class RunnerViewModel: ObservableObject {
         schemeCache = UserDefaults.standard.dictionary(forKey: schemeCacheKey) as? [String: [String]] ?? [:]
 
         startRequestWatcher()
+        BackgroundCleanup.schedule()
     }
 
     /// Watches for CLI-delegated run requests and executes them as GUI runs.

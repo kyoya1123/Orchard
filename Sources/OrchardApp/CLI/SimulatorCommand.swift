@@ -20,9 +20,11 @@ struct SimulatorOptions: ParsableArguments {
     var json = false
 
     func prepare(name: String?) async throws {
+        let project = name == nil ? nil : try? ProjectDetector().detect(from: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
         let result = try await SimulatorBaseService().prepare(
-            name: name, selection: .init(deviceType: deviceType, runtime: runtime),
+            name: name, selection: .init(deviceType: deviceType, runtime: runtime), project: project,
             progress: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
+        await BackgroundCleanup.launch()
         if json {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

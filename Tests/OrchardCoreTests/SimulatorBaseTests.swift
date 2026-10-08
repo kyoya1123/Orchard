@@ -57,6 +57,15 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(cloned.first?["name"], "feature-one")
     }
 
+    func testBranchDeletedAfterCatalogIsClonedAgainInsteadOfReturningMissingUDID() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "feature-race")
+        await fake.deleteBranchesAfterNextCatalog()
+        let second = try await service.prepare(name: "feature-race")
+        XCTAssertFalse(second.reused)
+        XCTAssertNotEqual(second.udid, first.udid)
+    }
+
     func testRepeatedPrepareReusesBaseAndBranch() async throws {
         let (service, fake, _) = try fixture()
         let first = try await service.prepare(name: "feature-one")
@@ -200,6 +209,9 @@ private actor SimulatorFixture {
     var failure: String?
     var userApps: Set<String> = []
     var privateSet: String?
+    var deleteAfterCatalog = false
+
+    func deleteBranchesAfterNextCatalog() { deleteAfterCatalog = true }
 
     func setXcode(_ value: String) { xcode = value }
     func setRuntimeBuild(_ value: String) { runtimeBuild = value }
@@ -254,7 +266,10 @@ private actor SimulatorFixture {
 
     func run(_ tool: String, _ arguments: [String]) throws -> String {
         calls.append([tool] + arguments)
-        if tool == "xcodebuild" { return xcode }
+        if tool == "xcodebuild" {
+            if deleteAfterCatalog { defaultDevices = []; deleteAfterCatalog = false }
+            return xcode
+        }
         if tool == "--find" { return "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl" }
         guard tool == "simctl", arguments.count >= 3, arguments[0] == "--set" else {
             throw OrchardError.message("Unexpected command")
@@ -264,7 +279,8 @@ private actor SimulatorFixture {
         switch args[0] {
         case "list":
             if args == ["list", "-j"] { return try catalog() }
-            return try encoded(["devices": ["com.apple.iOS-27-0": devicesJSON(privateDevices)]])
+            let listed = arguments[1].hasSuffix("/default") ? defaultDevices : privateDevices
+            return try encoded(["devices": ["com.apple.iOS-27-0": devicesJSON(listed)]])
         case "create":
             let new = device(args[1], state: "Shutdown")
             privateDevices.append(new)

@@ -23,7 +23,7 @@ Orchard reuses the project's existing `DerivedData/SourcePackages` when present.
 
 Scheme listing, builds and build-product lookup use the same package directory. Commands for the same project are serialized across the GUI and CLI until build-product lookup finishes; different worktrees can still build concurrently. The normal DerivedData build location remains unchanged. A successful resolution/build publishes a template only when the pinned Git checkouts are clean and artifact paths are self-contained. Local/registry packages and unsupported lockfile formats use normal Xcode behavior. Failed clones fall back to Xcode resolution, never a full copy.
 
-This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. Existing package directories and per-worktree edits are never automatically deleted. To opt out, launch Orchard/its CLI with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
+This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. This SPM sharing service never deletes existing package directories or per-worktree edits. The separate background collector described below can remove expired DerivedData, but preserves modified package checkouts. To opt out, launch Orchard/its CLI with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
 
 ## Empty Simulator bases
 
@@ -49,6 +49,17 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 ```
 
 `Scripts/ios-run.sh` is the compatible skill adapter (`[branch-or-device] [scheme] [device-type] [iOS] [delegate|follow]`). Replace an older skill's `run.sh` with this adapter once; base management subsequently ships in Orchard itself. Omitted device/runtime arguments select `latest`; repository instructions that pin an older configuration must be updated separately to opt into automatic selection.
+
+## Background artifact cleanup
+
+Orchard checks for unused artifacts when the app starts, when preparing a branch Simulator, and around package/build operations. Collection runs in a separate background process with low CPU and disk I/O priority. It never waits on the UI thread, and a process lock coalesces overlapping requests.
+
+- An owned branch Simulator or DerivedData directory is eligible when its recorded worktree directory no longer exists, or when it has been unused for **seven days**. Discovery does not reset the retention clock.
+- Eligible booted Simulators are shut down and deleted, including Simulators whose worktree has disappeared. Standard-name devices, private bases, renamed devices and devices without an established owner are preserved.
+- Orchard builds, Simulator preparation and installation hold process-shared leases. A collector skips busy artifacts. Console attachment alone does not pin an orphan Simulator indefinitely. DerivedData collection also defers during external `xcodebuild` activity, when an Xcode build service has that directory open, or when a package checkout contains local changes.
+- Worktree directories, branches and source files are never deleted. Ownership comes from recorded project paths and configured repositories, including registered external/Codex worktrees. A missing external worktree needs a previously recorded association; names alone are not ownership proof.
+
+Inspect with `orchard cleanup --json`; this does not stop Simulators or delete artifacts. Use `orchard cleanup --apply` for an explicit collection. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
 
 ## Requirements
 

@@ -112,7 +112,7 @@ final class CLIEnvironment: @unchecked Sendable {
         if let simulatorSelection {
             let prepared = try await SimulatorBaseService().prepare(
                 name: worktree.branchName.replacingOccurrences(of: "/", with: "-"),
-                selection: simulatorSelection, progress: { self.emitProgress($0) })
+                selection: simulatorSelection, project: worktree.project, progress: { self.emitProgress($0) })
             return (worktree, resolvedScheme, XcodeDestination(id: prepared.udid, name: prepared.name,
                 runtime: prepared.runtime, isAvailable: true, kind: .simulator))
         }
