@@ -133,6 +133,8 @@ Terminal integration code still exists (`TerminalContextProvider`, `GhosttyConte
   - Git root/branch/worktree calls.
 - `Sources/OrchardCore/XcodeService.swift`
   - Schemes, destinations, build settings.
+- `Sources/OrchardCore/SourcePackageCache.swift`
+  - APFS-cloned SPM templates, per-project process locks, path rebasing, and bounded immutable snapshots. `schemes`, build and buildSettings must keep the same package arguments. The lease ends before app launch/console attachment.
 - `Sources/OrchardCore/BuildRunService.swift`
   - Build/install/launch/stop implementation.
 - `Sources/OrchardCore/DeviceLockDetector.swift`
