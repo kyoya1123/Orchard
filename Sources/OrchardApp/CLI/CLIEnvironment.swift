@@ -20,7 +20,6 @@ final class CLIEnvironment: @unchecked Sendable {
     let json: Bool
     let quiet: Bool
 
-    private let resolver = WorktreeContextResolver()
     private let xcodeService = XcodeService()
     private let outputLock = NSLock()
 
@@ -49,18 +48,13 @@ final class CLIEnvironment: @unchecked Sendable {
     private var lastPersist: Date?
 
     /// Directory precedence: explicit `--dir` overrides everything, then the
-    /// `ORCHARD_DIRS` env var (colon-separated), then the directories the GUI
-    /// persisted. This lets the CLI work standalone in CI while still sharing
-    /// the GUI's configuration on a developer machine.
+    /// `ORCHARD_DIRS` env var (colon-separated). With neither, discovery prefers
+    /// the current project, then shared manual/automatic registration.
     init(extraDirectoryPaths: [String], json: Bool, quiet: Bool = false) {
         var paths = extraDirectoryPaths
 
         if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["ORCHARD_DIRS"], !envValue.isEmpty {
             paths = envValue.split(separator: ":").map(String.init)
-        }
-
-        if paths.isEmpty {
-            paths = AppConfiguration.configuredDirectoryPaths()
         }
 
         directoryURLs = paths.map {
@@ -73,11 +67,23 @@ final class CLIEnvironment: @unchecked Sendable {
     // MARK: - Fetching
 
     func worktrees() async -> [WorktreeContext] {
-        await resolver.resolve(fromConfiguredDirectoryURLs: directoryURLs)
+        await ProjectDiscovery().resolve(explicitDirectories: directoryURLs,
+            currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+            configuredDirectories: AppConfiguration.configuredDirectoryPaths().map { URL(fileURLWithPath: $0) })
     }
 
     func schemes(for project: XcodeProject) async throws -> [String] {
-        try await xcodeService.schemes(project: project)
+        // Register before any xcodebuild call, including failed scheme/build
+        // attempts. Both `run` and `list schemes` use this path.
+        await Self.register(project: project)
+        return try await xcodeService.schemes(project: project)
+    }
+
+    static func register(project: XcodeProject) async {
+        do { try await RepositoryRegistry().register(project: project) }
+        catch {
+            FileHandle.standardError.write(Data("Could not add project to Orchard: \(error.localizedDescription)\n".utf8))
+        }
     }
 
     func destinations() async throws -> [XcodeDestination] {

@@ -2,12 +2,12 @@
 
 User-facing documentation lives in `README.md` (English) and `README.ja.md` (Japanese). This file holds internal behavior details and guidance for coding agents.
 
-Orchard is intentionally repository-agnostic: users configure directories to scan, and Orchard discovers Xcode projects and git worktrees inside those directories. Do not add assumptions tied to any specific repository.
+Orchard is intentionally repository-agnostic: CLI usage automatically registers repositories; users can also configure directories, and Orchard discovers Xcode projects and git worktrees inside those directories. Do not add assumptions tied to any specific repository.
 
 ## Current Product Behavior
 
 - Runs as a `MenuBarExtra` app.
-- Lets users configure scan directories from the settings view.
+- Automatically registers projects used by `run`, `list schemes`, and `simulator ensure`; settings also supports optional manual scan directories.
 - Discovers git repositories and worktrees under configured directories.
 - Lets users choose:
   - Project: shown as git branch name.
@@ -75,7 +75,9 @@ See `README.md` for the user-facing CLI reference. Internal details:
   - **CLI → GUI**: each `run` writes/updates a `RunRecord` (source `cli`) as it progresses; the menu bar app watches the store with FSEvents (only while the menu is open — no idle polling) and mirrors CLI runs into its Runs list. The CLI stays terminal-complete, so `run` works whether or not the GUI is open. A CLI run records its PID, so the GUI's Stop button signals it (SIGINT); the CLI then tears down the app, writes `stopped`, and exits 130. Rerun from the GUI cancels the CLI run and restarts it as a GUI-managed run.
   - **GUI → CLI**: GUI runs (including reruns) also write records (source `gui`), so an agent can read them with `orchard runs` / `orchard runs <id> --log`.
 - One run per destination: starting a run (CLI or GUI) on a destination replaces any existing run there. Jobs whose worktree/branch was deleted from disk are dropped when the menu opens or refreshes. Finished records are pruned after 24h.
-- Directory precedence for worktree discovery: `--dir` overrides the `ORCHARD_DIRS` env var (colon-separated), which overrides the directories the GUI persisted. The CLI reads the GUI's settings via `UserDefaults(suiteName: "dev.codex.Orchard")` — necessary because a bare binary has no bundle id, so `UserDefaults.standard` would resolve to a different domain than the bundled GUI. Run via the bundle or rely on `--dir`/`ORCHARD_DIRS` if the shared defaults are unavailable.
+- Directory precedence: `--dir` → `ORCHARD_DIRS` → current project/repository → auto-registered repositories plus manual GUI directories. Shared GUI defaults use `dev.codex.Orchard` even for bare CLI binaries.
+- `RepositoryRegistry` uses canonical Git common-directory identity, relative project locations, atomic per-repository records and process locks. Registration happens before scheme/build/Simulator work and has no opt-out. `list branches`/destinations/runs remain read-only. Discovery metadata must not replace artifact ownership history.
+- The GUI watches `Repositories-v1/repositories` with FSEvents, loads/scans outside MainActor and coalesces refreshes. Identical registration does not rewrite files. CLI projects bypass required onboarding; manual directory addition remains optional.
 
 ## Discovery Model
 
@@ -83,12 +85,12 @@ Worktree discovery is independent of any terminal app.
 
 Main flow:
 
-1. User configures one or more scan directories.
-2. `WorktreeContextResolver.resolve(fromConfiguredDirectoryURLs:)` walks configured directories.
+1. CLI usage registers a project; users may also configure scan directories.
+2. `WorktreeContextResolver` merges configured-directory discovery with registered repositories.
 3. It finds git repositories.
 4. For each repository, it runs `git worktree list --porcelain`.
 5. It creates one `WorktreeContext` per worktree.
-6. It walks up from each worktree to find the nearest `.xcworkspace` or `.xcodeproj`.
+6. It discovers `.xcworkspace` or `.xcodeproj`, including relative nested project locations recorded by CLI usage.
 
 Fallback scanning also checks:
 

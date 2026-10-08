@@ -24,7 +24,7 @@ public struct GitService: Sendable {
             return nil
         }
 
-        let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         let branchName = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/git"),
             arguments: ["-C", rootURL.path, "branch", "--show-current"],
@@ -53,18 +53,33 @@ public struct GitService: Sendable {
     public func worktreeRootURLs(from repositoryURL: URL) async -> [URL] {
         guard let output = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/git"),
-            arguments: ["-C", repositoryURL.path, "worktree", "list", "--porcelain"],
+            arguments: ["-C", repositoryURL.path, "worktree", "list", "--porcelain", "-z"],
             currentDirectoryURL: nil
         ), !output.isEmpty else {
             return []
         }
 
+        return Self.parseWorktreeRoots(output)
+    }
+
+    public func worktreeRootURLs(gitCommonDirectory: URL) async -> [URL] {
+        guard let output = try? await ProcessRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/git"),
+            arguments: ["--git-dir", gitCommonDirectory.path, "worktree", "list", "--porcelain", "-z"],
+            currentDirectoryURL: nil
+        ) else { return [] }
+        return Self.parseWorktreeRoots(output)
+    }
+
+    private static func parseWorktreeRoots(_ output: String) -> [URL] {
         return output
-            .split(separator: "\n")
+            .components(separatedBy: "\0\0")
+            .filter { !$0.components(separatedBy: "\0").contains("bare") }
+            .flatMap { $0.components(separatedBy: "\0") }
             .compactMap { line -> URL? in
                 guard line.hasPrefix("worktree ") else { return nil }
                 let path = line.dropFirst("worktree ".count)
-                return URL(fileURLWithPath: String(path), isDirectory: true)
+                return URL(fileURLWithPath: String(path), isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
             }
     }
 }

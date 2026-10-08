@@ -4,12 +4,12 @@
 
 Orchard は、スキームや実行先を選ぶためだけに Xcode を開かなくても、シミュレーターや実機で Xcode アプリをビルド・実行できる macOS メニューバーアプリ(兼ヘッドレス CLI)です。
 
-git worktree ベースのワークフローを前提に設計されています。リポジトリや worktree が置かれているディレクトリを Orchard に登録すると、各 worktree がブランチ名付きのプロジェクトとして一覧に現れます。プロジェクト・スキーム・実行先を選んで **Build & Run** を押すだけです。
+git worktree ベースのワークフローを前提に設計されています。CLIから使ったプロジェクトのリポジトリが自動登録され、各 worktree がブランチ名付きのプロジェクトとして一覧に現れます。プロジェクト・スキーム・実行先を選んで **Build & Run** を押すだけです。
 
 ## 特徴
 
 - **メニューバー UI** — プロジェクト(git ブランチ)/スキーム/実行先をコンパクトなフォームで選び、ワンクリックで **Build & Run**。
-- **worktree の自動検出** — 登録ディレクトリから git リポジトリと worktree(`git worktree list`)を探索し、それぞれに最も近い `.xcworkspace` / `.xcodeproj` を見つけます。複数ブランチを切り替えなしで同時に動かせます。
+- **worktree の自動検出** — CLIで自動登録したリポジトリと、任意で追加したディレクトリからworktree（`git worktree list`）を探索し、それぞれに最も近い `.xcworkspace` / `.xcodeproj` を見つけます。複数ブランチを切り替えなしで同時に動かせます。
 - **シミュレーターと実機** — 実機とお気に入りのシミュレーターをデフォルトで表示し、その他のシミュレーターもワンクリックで展開できます。お気に入りは記憶されます。
 - **実行(Run)管理** — 各 Run が個別のコンソールログと **Stop** / **Rerun** / **Close** ボタン、ステータスを持ちます。Run はプロジェクトごとにグループ化され、同じ実行先で新しい Run を開始すると前の Run が置き換わります(Xcode の Run ボタンと同じ挙動)。
 - **ビルドログではなくアプリのコンソールを表示** — ログビューには起動したアプリのコンソール出力が表示されます。Orchard 自身のビルド・インストールの診断ログは別の Console 画面にあります。
@@ -81,14 +81,14 @@ CLI を使う場合は、バンドル内のバイナリを `PATH` にシンボ�
 ln -sf "$PWD/Orchard.app/Contents/MacOS/orchard" /usr/local/bin/orchard
 ```
 
-> `Orchard.app` 内のバイナリを経由して実行することが重要です。素のバイナリには bundle identifier がないため、GUI と設定(スキャンディレクトリやお気に入り)を共有できません。
+> アプリ内のCLIと単体バイナリは、自動登録とGUIの設定（`dev.codex.Orchard`）を共有します。`--delegate`でGUIを自動起動する場合はアプリ内のCLIを使います。
 
 ## 使い方
 
 ### GUI
 
-1. メニューバーの Orchard アイコンから設定を開きます。
-2. リポジトリや worktree が置かれているスキャンディレクトリを 1 つ以上追加します。
+1. プロジェクトで `orchard run`、`orchard list schemes`、または `orchard simulator ensure` を使うと、そのリポジトリとworktreeがGUIに自動登録されます。
+2. メニューバーのOrchardを開きます。設定画面でのフォルダ追加もできますが、必須ではありません。
 3. プロジェクト・スキーム・実行先を選んで **Build & Run** を押します。
 
 ### CLI
@@ -121,7 +121,11 @@ orchard runs <id> --log      # その Run のログだけを出力
 
 Run はディスク上の Run ストア(`~/Library/Application Support/Orchard/runs/`)を介して双方向に共有されます。CLI の Run は GUI の Runs リストに表示され(そこから停止・再実行も可能)、GUI の Run は `orchard runs` から参照できます。
 
-worktree 探索ディレクトリの優先順位: `--dir` フラグ → 環境変数 `ORCHARD_DIRS`(コロン区切り)→ GUI で設定したディレクトリ。
+探索対象の優先順位は `--dir` → `ORCHARD_DIRS`（コロン区切り）→ 現在のXcodeプロジェクト／Gitリポジトリ → 自動登録済みリポジトリとGUIで追加したディレクトリです。現在のリポジトリを優先するため、別リポジトリの同名ブランチがローカル実行に混ざりません。
+
+`run`と`list schemes`は、スキーム一覧の取得やビルドより先に、選択したプロジェクトを登録します。`simulator ensure`は実行フォルダのプロジェクトをSimulator準備前に登録します。ビルドに失敗しても登録は残ります。事前設定や自動登録を無効にするオプションはありません。`list branches`・`list destinations`・`runs`は一覧の参照だけで、プロジェクトを登録しません。Gitを使わないXcodeプロジェクトも登録できます。
+
+登録先は `~/Library/Application Support/Orchard/Repositories-v1/` です。Gitの共通ディレクトリでリポジトリを識別し、worktreeやシンボリックリンク経由の重複を避けます。サブフォルダのプロジェクトはworktreeルートからの相対位置を記録します。最初に登録したworktreeを削除しても、Codexなどの外部worktreeを含む残りのworktreeを探索できます。複数CLIからの同時登録はプロセスロックとatomic writeで保護します。GUIはファイル変更を監視し、メインアクターの外で再探索します。同じプロジェクトの再実行では登録を書き直しません。手動のフォルダ設定と、クリーンアップ用の所有者履歴は独立して保持します。
 
 ## 開発
 

@@ -4,12 +4,12 @@
 
 Orchard is a macOS menu bar app (and headless CLI) for building and running Xcode apps on simulators and devices — without opening Xcode just to pick a scheme or destination.
 
-It is built with git worktree workflows in mind: point Orchard at the directories where your repositories and worktrees live, and every worktree shows up as a selectable project, labeled by its branch name. Pick a project, a scheme, and a destination, then hit **Build & Run**.
+It is built with git worktree workflows in mind: use a project from the CLI and its repository is added automatically, so every worktree shows up as a selectable project, labeled by its branch name. Pick a project, a scheme, and a destination, then hit **Build & Run**.
 
 ## Features
 
 - **Menu bar UI** — choose project (git branch) / scheme / destination from a compact form, with a one-click **Build & Run** button.
-- **Worktree discovery** — scans your configured directories for git repositories and worktrees (`git worktree list`), then finds the nearest `.xcworkspace` / `.xcodeproj` for each. Run multiple branches side by side without switching anything.
+- **Worktree discovery** — discovers CLI-registered repositories and optionally configured directories through `git worktree list`, then finds the nearest `.xcworkspace` / `.xcodeproj` for each. Run multiple branches side by side without switching anything.
 - **Simulators and devices** — physical devices and your favorite simulators are listed by default; more simulators are one click away. Favorites are remembered.
 - **Run management** — each run has its own console log, **Stop** / **Rerun** / **Close** controls, and status. Runs are grouped per project, and starting a new run on a destination replaces the previous one — just like Xcode's Run button.
 - **App console, not build noise** — the log view shows the launched app's console output. Orchard's own build/install diagnostics live in a separate Console screen.
@@ -83,14 +83,14 @@ To use the CLI, symlink the bundled binary onto your `PATH`:
 ln -sf "$PWD/Orchard.app/Contents/MacOS/orchard" /usr/local/bin/orchard
 ```
 
-> Running the binary from inside `Orchard.app` matters: a bare binary has no bundle identifier, so it would not share settings (scan directories, favorites) with the GUI.
+> The bundled and bare CLI share automatic project registration and read GUI settings from the `dev.codex.Orchard` preferences domain. The bundle is needed to launch the GUI automatically with `--delegate`.
 
 ## Usage
 
 ### GUI
 
-1. Open the Orchard menu bar item and go to Settings.
-2. Add one or more scan directories (where your repositories / worktrees live).
+1. Use `orchard run`, `orchard list schemes`, or `orchard simulator ensure` from a project. Its repository and worktrees appear in the GUI automatically.
+2. Open the Orchard menu bar item. Settings also lets you add directories manually; this is optional.
 3. Pick a project, scheme, and destination, then press **Build & Run**.
 
 ### CLI
@@ -123,7 +123,11 @@ Output is designed for agents and scripts:
 
 Runs are shared both ways through an on-disk run store (`~/Library/Application Support/Orchard/runs/`): CLI runs appear in the GUI's Runs list (stoppable and rerunnable from there), and GUI runs are readable via `orchard runs`.
 
-Worktree discovery directories are resolved in this order: `--dir` flags → `ORCHARD_DIRS` environment variable (colon-separated) → directories configured in the GUI.
+Worktree discovery scope is resolved in this order: `--dir` flags → `ORCHARD_DIRS` environment variable (colon-separated) → the current Xcode project / Git repository → automatically registered repositories plus directories configured in the GUI. The current repository takes precedence so another repository with the same branch name does not make local runs ambiguous.
+
+`run` and `list schemes` register the selected project before listing schemes or building; `simulator ensure` registers the project in its working directory before preparing a Simulator. Registration survives a failed build. There is no setup step or opt-out. Read-only inventory commands (`list branches`, `list destinations`, `runs`) do not add projects. Non-Git projects can also be registered.
+
+The shared registry lives under `~/Library/Application Support/Orchard/Repositories-v1/`. Git common-directory identity deduplicates worktrees and symlinks; nested project locations are remembered relative to the worktree root. Even if the original worktree disappears, discovery follows the remaining worktrees, including external Codex worktrees. Atomic writes and per-repository process locks preserve simultaneous additions. The GUI watches registry changes without periodic polling and scans off the main actor. Repeated use of the same project does not rewrite its registration. Manual directory settings and cleanup ownership records remain independent.
 
 ## Development
 

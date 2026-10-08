@@ -18,7 +18,7 @@ struct DirectoryOptions: ParsableArguments {
     @Option(
         name: .long,
         parsing: .upToNextOption,
-        help: "Directories to scan for worktrees. Overrides ORCHARD_DIRS and the GUI's configured directories."
+        help: "Directories to scan for worktrees. Overrides ORCHARD_DIRS, the current directory, and registered projects."
     )
     var dir: [String] = []
 
