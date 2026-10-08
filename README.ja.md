@@ -17,6 +17,27 @@ git worktree ベースのワークフローを前提に設計されています�
 - **Xcode とビルドキャッシュを共有** — ビルドは標準の DerivedData を使う `xcodebuild` で実行されるため、Orchard と Xcode が互いのビルド成果物を再利用できます。
 - **自動化向けヘッドレス CLI** — 同じバイナリが `orchard` CLI としても動作し、GUI とまったく同じビルド・インストール・起動パイプラインを実行します。あいまいマッチ、NDJSON 出力、GUI と CLI が互いの Run を参照できる共有 Run ストアを備え、コーディングエージェントから操作されることを想定した設計です。
 
+## 空のSimulator base
+
+`orchard run --branch <branch> --scheme <scheme> --branch-simulator` で、ブランチ用Simulatorを自動準備できます。実行時に選択中のXcodeで利用可能なインストール済みiOSを確認し、対応する最新世代のiPhone（同世代ではProを優先）を選びます。機種・iOS・名前が一致する既存Simulatorは再利用し、新規Simulatorは `simctl clone` で複製します。ランタイムのダウンロードは行いません。`--device-type` / `--runtime` の明示指定を優先し、従来の `--destination` 指定の動作は変わりません。
+
+baseは新規作成 → 初回起動完了を待機 → システムアプリのみであることを確認 → 停止、の手順で準備します。アプリのインストールやアプリ用の設定は行いません。通常の実行先に表示されない専用device set（`~/Library/Application Support/Orchard/SimulatorBases-v1/devices`）で管理します。機種・iOSのビルド・Xcodeのビルドとツールパス・初期化方式が一致するbaseは再利用し、変更時に作り直します。
+
+新baseの準備と必要な複製が成功した後、管理台帳にある旧baseを削除します。起動中・名前や機種が変更されたもの・ユーザーアプリの入ったものは残し、診断を表示します。初期化や複製に失敗した場合は旧baseを残します。ブランチ用Simulator、アプリデータ、管理対象外のSimulator（従来の `base` という名前のものも含む）は削除しません。複数プロセスによる同時作成はロックで防ぎます。既存Simulatorの圧縮や、利用中に増えるログの削減を行う機能ではありません。
+
+```bash
+# baseだけを準備・更新。アプリのビルドやインストールは行わない
+orchard simulator base --json
+
+# ブランチ用Simulatorを準備。標準出力はUDID
+orchard simulator ensure --name feature-example
+
+# 最新機種・iOSを自動選択して実行
+orchard run --branch feature/example --scheme MyScheme --branch-simulator --delegate
+```
+
+`Scripts/ios-run.sh` は従来のskillと互換の引数を持つアダプターです（`[branch-or-device] [scheme] [device-type] [iOS] [delegate|follow]`）。古いskillの `run.sh` を一度この版に更新すれば、以後のbase管理処理はOrchard側の更新で反映されます。機種・iOSの引数を省略すると `latest` を選択します。リポジトリの指示に機種やiOSが固定されている場合は、その指定の更新も必要です。
+
 ## Swift Package の容量対策
 
 既存の `DerivedData/SourcePackages` があれば、その場所を引き続き使用します。新しい worktree には `~/Library/Caches/Orchard/SourcePackages-v1/` 配下に専用の依存フォルダを作り、APFS の Copy-on-Write でテンプレートから複製します。テンプレートは Git リポジトリ・`Package.resolved`・選択中の Xcode ごとに識別し、リポジトリごとに最大3世代を保持します。各 worktree の変更は独立しています。

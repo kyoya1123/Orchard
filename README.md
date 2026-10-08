@@ -25,6 +25,31 @@ Scheme listing, builds and build-product lookup use the same package directory. 
 
 This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. Existing package directories and per-worktree edits are never automatically deleted. To opt out, launch Orchard/its CLI with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
 
+## Empty Simulator bases
+
+`orchard run --branch <branch> --scheme <scheme> --branch-simulator` prepares a branch Simulator automatically. Orchard checks the selected Xcode's installed, available iOS runtimes on each request, chooses the newest compatible iPhone hardware generation (preferring Pro within a generation), and reuses an exact matching branch Simulator or clones a base with `simctl clone`. It does not download runtimes. Explicit `--device-type` and `--runtime` values override automatic selection. Existing `--destination` runs are unchanged.
+
+A base is created, booted through `simctl bootstatus`, checked for system apps only, then shut down. Orchard installs no app and applies no app settings to it. Bases are stored in a separate CoreSimulator device set under `~/Library/Application Support/Orchard/SimulatorBases-v1/devices`, so they do not appear among normal run destinations. The registry includes the device type, runtime build, Xcode build/tool path and initialization revision. Matching bases are reused; changes prepare a new base on demand, not a new base for every build.
+
+After preparation (and cloning, when requested) succeeds, obsolete registered bases are deleted only if still shut down, unmodified in identity, and free of user-installed apps. Busy/modified bases are preserved with a diagnostic and retried later. Failed initialization/cloning retains the previous base. Branch Simulators, their app data, and unmanaged devices—including a legacy device named `base`—are never deleted by this feature. Cross-process locking prevents duplicate initialization. APFS sharing reduces growth of new Simulators; it does not compact existing ones or prevent new logs/app data from accumulating.
+
+```bash
+# Prepare/refresh only the base; no app build or installation
+orchard simulator base --json
+
+# Reuse/create one named branch Simulator; stdout is its UDID
+orchard simulator ensure --name feature-example
+
+# Explicit test configuration
+orchard simulator ensure --name feature-example \
+  --device-type "iPhone 18 Pro" --runtime "iOS 27.0"
+
+# Build/run using automatic latest-device selection
+orchard run --branch feature/example --scheme MyScheme --branch-simulator --delegate
+```
+
+`Scripts/ios-run.sh` is the compatible skill adapter (`[branch-or-device] [scheme] [device-type] [iOS] [delegate|follow]`). Replace an older skill's `run.sh` with this adapter once; base management subsequently ships in Orchard itself. Omitted device/runtime arguments select `latest`; repository instructions that pin an older configuration must be updated separately to opt into automatic selection.
+
 ## Requirements
 
 - macOS 14 or later

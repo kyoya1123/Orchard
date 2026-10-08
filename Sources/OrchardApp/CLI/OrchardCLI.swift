@@ -9,7 +9,7 @@ struct OrchardCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "orchard",
         abstract: "Build and run iOS apps from a worktree/scheme/destination, the same flow as the Orchard menu bar app.",
-        subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self]
+        subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self, SimulatorCommand.self]
     )
 }
 
@@ -51,6 +51,10 @@ func runOrchardCLI(_ arguments: [String]) async {
         case var command as ListDestinations:
             try await command.run()
         case var command as RunsCommand:
+            try await command.run()
+        case var command as SimulatorEnsure:
+            try await command.run()
+        case var command as SimulatorBase:
             try await command.run()
         default:
             var command = parsed
