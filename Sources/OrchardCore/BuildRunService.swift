@@ -62,28 +62,33 @@ public final class BuildRunService: @unchecked Sendable {
             ? SimSlimService.slimTaskIfNeeded(udid: destination.id, log: commandLog)
             : nil
 
-        let buildArguments = project.xcodebuildArguments + [
-            "-scheme", scheme,
-            "-destination", destination.xcodebuildDestination,
-            "build"
-        ]
-
-        progress("Building")
-        commandLog("$ xcodebuild \(buildArguments.joined(separator: " "))\n")
-        try await runStreaming(
-            executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-            arguments: buildArguments,
-            currentDirectoryURL: project.rootURL,
-            log: commandLog
-        )
-        try throwIfStopped()
-
-        progress("Resolving build product")
-        let settings = try await XcodeService().buildSettings(
+        progress("Preparing Swift packages")
+        let settings = try await SourcePackageCache().withCache(
             project: project,
-            scheme: scheme,
-            destination: destination
-        )
+            checkCancellation: { try self.throwIfStopped() },
+            log: commandLog
+        ) { packageArguments in
+            try self.throwIfStopped()
+            let buildArguments = project.xcodebuildArguments + packageArguments + [
+                "-scheme", scheme,
+                "-destination", destination.xcodebuildDestination,
+                "build"
+            ]
+            progress("Building")
+            commandLog("$ xcodebuild \(buildArguments.joined(separator: " "))\n")
+            try await self.runStreaming(
+                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                arguments: buildArguments,
+                currentDirectoryURL: project.rootURL,
+                log: commandLog
+            )
+            try self.throwIfStopped()
+            progress("Resolving build product")
+            return try await XcodeService().buildSettings(
+                project: project, scheme: scheme, destination: destination,
+                packageArguments: packageArguments
+            )
+        }
         try throwIfStopped()
 
         guard let app = settings.firstRunnableApp else {

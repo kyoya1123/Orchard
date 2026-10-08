@@ -4,11 +4,13 @@ public struct XcodeService: Sendable {
     public init() {}
 
     public func schemes(project: XcodeProject) async throws -> [String] {
-        let output = try await ProcessRunner.run(
-            executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-            arguments: project.xcodebuildArguments + ["-list", "-json"],
-            currentDirectoryURL: project.rootURL
-        )
+        let output = try await SourcePackageCache().withCache(project: project) { packageArguments in
+            try await ProcessRunner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                arguments: project.xcodebuildArguments + packageArguments + ["-list", "-json"],
+                currentDirectoryURL: project.rootURL
+            )
+        }
 
         let data = Data(output.utf8)
         let decoded = try JSONDecoder().decode(XcodeListResponse.self, from: data)
@@ -60,9 +62,22 @@ public struct XcodeService: Sendable {
         scheme: String,
         destination: XcodeDestination
     ) async throws -> XcodeBuildSettings {
+        try await SourcePackageCache().withCache(project: project) { packageArguments in
+            try await buildSettings(project: project, scheme: scheme, destination: destination,
+                                    packageArguments: packageArguments)
+        }
+    }
+
+    // The caller owns the cache lease; do not acquire it again during build/run.
+    func buildSettings(
+        project: XcodeProject,
+        scheme: String,
+        destination: XcodeDestination,
+        packageArguments: [String]
+    ) async throws -> XcodeBuildSettings {
         let output = try await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-            arguments: project.xcodebuildArguments + [
+            arguments: project.xcodebuildArguments + packageArguments + [
                 "-scheme", scheme,
                 "-destination", destination.xcodebuildDestination,
                 "-showBuildSettings",
