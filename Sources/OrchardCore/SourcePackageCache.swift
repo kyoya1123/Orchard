@@ -34,6 +34,8 @@ public struct SourcePackageCache: Sendable {
     ) async throws -> Value {
         try Task.checkCancellation()
         try checkCancellation()
+        let activity = try await ArtifactActivity.begin(project: project)
+        defer { activity?.finish() }
         let context: Context?
         do {
             context = try await self.context(for: project)

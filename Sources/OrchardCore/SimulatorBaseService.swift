@@ -34,10 +34,14 @@ public struct SimulatorBaseService: Sendable {
     }
 
     public func prepare(name: String? = nil, selection: SimulatorSelection = .init(),
+                        project: XcodeProject? = nil,
                         progress: @Sendable (String) -> Void = { _ in }) async throws -> PreparedSimulator {
         if let name, name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw OrchardError.message("The branch Simulator name must not be empty.")
         }
+        let activity: ArtifactActivity?
+        if let project { activity = try await ArtifactActivity.begin(project: project) } else { activity = nil }
+        defer { activity?.finish() }
         let lease = try await CacheLease.acquire(root.appendingPathComponent("lock"))
         defer { lease.unlock() }
         try Task.checkCancellation()
@@ -50,7 +54,7 @@ public struct SimulatorBaseService: Sendable {
                                           runtimeBuild: runtime.buildversion, xcode: xcode,
                                           simctlPath: simctlPath, revision: 1)
         var registry = try loadRegistry()
-        let branchMatches = name.map { name in
+        var branchMatches = name.map { name in
             (catalog.devices[runtime.identifier] ?? []).filter {
                 $0.isAvailable && $0.name == name && $0.deviceTypeIdentifier == type.identifier
             }
@@ -59,6 +63,19 @@ public struct SimulatorBaseService: Sendable {
             throw OrchardError.message("Multiple Simulators match \(name ?? "") / \(type.name) / \(runtime.name). Select an explicit UDID.")
         }
 
+        if let existing = branchMatches.first {
+            try await activity?.useSimulator(udid: existing.udid, name: existing.name)
+            // A collector may have completed while this invocation waited for
+            // the device lease. Never return the stale catalog's deleted UDID.
+            let fresh = try JSONDecoder().decode(DeviceList.self,
+                from: Data(try await simctl(["list", "devices", "-j"]).utf8))
+            branchMatches = (fresh.devices[runtime.identifier] ?? []).filter {
+                $0.isAvailable && $0.name == name && $0.deviceTypeIdentifier == type.identifier
+            }
+            guard branchMatches.isEmpty || (branchMatches.count == 1 && branchMatches[0].udid == existing.udid) else {
+                throw OrchardError.message("Simulator changed while preparing it; retry the command.")
+            }
+        }
         let privateDevices = try await baseDevices()
         var base: Entry?
         for entry in registry.entries where entry.configuration == configuration && entry.ready {
@@ -120,6 +137,9 @@ public struct SimulatorBaseService: Sendable {
                                        runtime: runtime.name, reused: privateDevices.devices.values.joined().contains { $0.udid == base.udid }, baseUDID: base.udid)
         }
 
+        if name != nil, !result.reused {
+            try await activity?.useSimulator(udid: result.udid, name: result.name)
+        }
         // Clone first: a clone failure must not discard the previous template.
         try await prune(registry: &registry, keeping: base.udid, progress: progress)
         return result
@@ -236,10 +256,15 @@ public struct SimulatorBaseService: Sendable {
 /// pipe deadlocks during boot, and the timeout bounds tool failures.
 enum SimulatorProcess {
     static func run(tool: String, arguments: [String], timeout: TimeInterval) async throws -> String {
+        try await execute(executable: "/usr/bin/xcrun", arguments: [tool] + arguments, timeout: timeout)
+    }
+
+    static func execute(executable: String, arguments: [String], timeout: TimeInterval,
+                        background: Bool = false) async throws -> String {
         let control = SimulatorProcessControl()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
+                DispatchQueue.global(qos: background ? .background : .userInitiated).async {
                     do {
                         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("OrchardSimctl-\(UUID().uuidString)")
                         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -252,8 +277,9 @@ enum SimulatorProcess {
                         let err = try FileHandle(forWritingTo: errorOutput)
                         defer { try? out.close(); try? err.close() }
                         let process = Process()
-                        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-                        process.arguments = [tool] + arguments
+                        process.executableURL = URL(fileURLWithPath: executable)
+                        process.arguments = arguments
+                        process.qualityOfService = background ? .background : .userInitiated
                         process.standardOutput = out
                         process.standardError = err
                         try control.start(process)

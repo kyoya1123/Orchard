@@ -196,3 +196,10 @@ open Orchard.app
 - A base has system apps only and is initialized by boot/bootstatus/shutdown. Do not install user apps, apply SimSlim, or run it as a build destination.
 - Replacement must finish initialization and any requested clone before pruning an older registered base. Recheck identity, Shutdown state and installed apps before deletion. Unknown, busy or modified devices are preserved.
 - Latest means installed compatible iOS plus newest iPhone hardware generation, preferring regular Pro within that generation; explicit configuration wins. No Xcode/runtime downloads.
+
+## Background artifact collection
+
+- `ArtifactActivity` records worktree ownership and holds shared process leases through build/install. Release before console attachment; console lifetime must not pin an orphan Simulator.
+- `ArtifactCleanup` deletes only attributable DerivedData and named branch Simulators when the owner directory is absent or the latest activity is seven days old. Never infer simulator ownership from a branch-shaped name. Standard devices/private bases, exclusions and modified package checkouts remain protected.
+- `cleanup-worker` is a hidden CLI entry point spawned independently at background CPU/I/O priority. Its exclusive worker lock prevents overlaps; per-project/device exclusive try-locks skip active operations. DerivedData is moved aside under the lock before slow deletion.
+- Keep all filesystem scans and deletion out of `MainActor`. Do not add periodic GUI timers or mutate existing worktrees. Test cleanup with injected paths and simulated commands.

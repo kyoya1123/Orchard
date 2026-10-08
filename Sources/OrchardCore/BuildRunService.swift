@@ -58,6 +58,8 @@ public final class BuildRunService: @unchecked Sendable {
         shouldStop = false
         isStopping = false
 
+        let activity = try await ArtifactActivity.begin(project: project, destination: destination)
+        defer { activity?.finish() }
         let slimTask = destination.kind == .simulator
             ? SimSlimService.slimTaskIfNeeded(udid: destination.id, log: commandLog)
             : nil
@@ -104,7 +106,8 @@ public final class BuildRunService: @unchecked Sendable {
                 attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
-                commandLog: commandLog
+                commandLog: commandLog,
+                activity: activity
             )
         case .simulator:
             try await installAndLaunchOnSimulator(
@@ -114,7 +117,8 @@ public final class BuildRunService: @unchecked Sendable {
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog,
-                slimTask: slimTask
+                slimTask: slimTask,
+                activity: activity
             )
         }
     }
@@ -163,7 +167,8 @@ public final class BuildRunService: @unchecked Sendable {
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void,
-        slimTask: Task<Void, Never>?
+        slimTask: Task<Void, Never>?,
+        activity: ArtifactActivity?
     ) async throws {
         if let slimTask {
             progress("Slimming simulator")
@@ -193,6 +198,7 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
+        activity?.finish()
         progress(attachConsole ? "" : "Launching")
         var launchArguments = ["simctl", "launch", "--terminate-running-process"]
         if attachConsole {
@@ -218,7 +224,8 @@ public final class BuildRunService: @unchecked Sendable {
         attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
-        commandLog: @Sendable @escaping (String) -> Void
+        commandLog: @Sendable @escaping (String) -> Void,
+        activity: ArtifactActivity?
     ) async throws {
         commandLog("$ xcrun devicectl device install app --device \(destination.id) \(app.appURL.path)\n")
         try await runStreamingWaitingForDeviceUnlock(
@@ -239,6 +246,7 @@ public final class BuildRunService: @unchecked Sendable {
         )
         try throwIfStopped()
 
+        activity?.finish()
         var launchArguments = [
             "devicectl", "device", "--quiet", "process", "launch",
             "--device", destination.id, "--terminate-existing"
