@@ -8,7 +8,7 @@ import Foundation
 // The dispatch happens before any SwiftUI/AppKit type is referenced so the CLI
 // path stays a pure command-line tool.
 let cliArguments = Array(CommandLine.arguments.dropFirst())
-let cliSubcommands: Set<String> = ["run", "list", "runs", "help"]
+let cliSubcommands: Set<String> = ["run", "list", "runs", "simulator", "help"]
 
 // Only treat the launch as CLI when the first token is a known subcommand or a
 // help flag. A GUI launch (Finder, LaunchServices, login item) can pass macOS

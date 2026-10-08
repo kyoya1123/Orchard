@@ -92,7 +92,8 @@ final class CLIEnvironment: @unchecked Sendable {
         branch: String,
         scheme: String,
         destination: String,
-        kindFilter: XcodeDestination.Kind?
+        kindFilter: XcodeDestination.Kind?,
+        simulatorSelection: SimulatorSelection? = nil
     ) async throws -> (worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
         let worktrees = await worktrees()
         guard !worktrees.isEmpty else {
@@ -107,6 +108,14 @@ final class CLIEnvironment: @unchecked Sendable {
             throw BuildFailure(message: "Failed to list schemes: \(error)")
         }
         let resolvedScheme = try SelectionResolver.resolveScheme(name: scheme, in: schemeList).get()
+
+        if let simulatorSelection {
+            let prepared = try await SimulatorBaseService().prepare(
+                name: worktree.branchName.replacingOccurrences(of: "/", with: "-"),
+                selection: simulatorSelection, progress: { self.emitProgress($0) })
+            return (worktree, resolvedScheme, XcodeDestination(id: prepared.udid, name: prepared.name,
+                runtime: prepared.runtime, isAvailable: true, kind: .simulator))
+        }
 
         let destinationList: [XcodeDestination]
         do {
@@ -130,9 +139,11 @@ final class CLIEnvironment: @unchecked Sendable {
         branch: String,
         scheme: String,
         destination: String,
-        kindFilter: XcodeDestination.Kind?
+        kindFilter: XcodeDestination.Kind?,
+        simulatorSelection: SimulatorSelection? = nil
     ) async throws -> (id: String, worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
-        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter)
+        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter,
+                                          simulatorSelection: simulatorSelection)
 
         let id = UUID().uuidString
         let payload = RunRequestPayload(
@@ -175,9 +186,11 @@ final class CLIEnvironment: @unchecked Sendable {
         destination: String,
         kindFilter: XcodeDestination.Kind?,
         timeout: Int?,
-        detached: Bool
+        detached: Bool,
+        simulatorSelection: SimulatorSelection? = nil
     ) async throws {
-        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter)
+        let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter,
+                                          simulatorSelection: simulatorSelection)
         let worktree = resolved.worktree
         let resolvedScheme = resolved.scheme
         let resolvedDestination = resolved.destination

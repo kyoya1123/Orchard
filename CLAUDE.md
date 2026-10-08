@@ -188,3 +188,11 @@ open Orchard.app
   - Empty `activityText` with a running job means the app launched successfully and progress UI should be hidden.
 - If changing build performance behavior, remember that omitting `-derivedDataPath` is intentional to share standard Xcode DerivedData.
 - After UI changes, run `swift test`, then `Scripts/package-app.sh`, then restart `Orchard.app`.
+
+## Simulator base ownership
+
+- `SimulatorBaseService` exclusively owns the private `SimulatorBases-v1/devices` device set and its manifest. Default-set branch Simulators are never cleaned up here.
+- `simulator base`, `simulator ensure`, and `run --branch-simulator` share the same process lock and service. `Scripts/ios-run.sh` delegates creation to that service.
+- A base has system apps only and is initialized by boot/bootstatus/shutdown. Do not install user apps, apply SimSlim, or run it as a build destination.
+- Replacement must finish initialization and any requested clone before pruning an older registered base. Recheck identity, Shutdown state and installed apps before deletion. Unknown, busy or modified devices are preserved.
+- Latest means installed compatible iOS plus newest iPhone hardware generation, preferring regular Pro within that generation; explicit configuration wins. No Xcode/runtime downloads.

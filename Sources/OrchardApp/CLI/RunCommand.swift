@@ -14,7 +14,16 @@ struct RunCommand: AsyncParsableCommand {
     var scheme: String
 
     @Option(name: [.short, .long], help: "Destination name or UDID, e.g. \"iPhone 15\" (fuzzy matched).")
-    var destination: String
+    var destination: String?
+
+    @Flag(name: .long, help: "Reuse or clone this branch's Simulator from Orchard's empty base.")
+    var branchSimulator = false
+
+    @Option(name: .long, help: "Device type for --branch-simulator (default: latest supported iPhone, preferring Pro).")
+    var deviceType: String = "latest"
+
+    @Option(name: .long, help: "Runtime for --branch-simulator (default: latest installed compatible iOS).")
+    var runtime: String = "latest"
 
     @Flag(name: .long, help: "Only match physical devices.")
     var device = false
@@ -37,12 +46,22 @@ struct RunCommand: AsyncParsableCommand {
         if device && simulator {
             throw ValidationError("Pass only one of --device or --simulator.")
         }
+        if branchSimulator && (destination != nil || device) {
+            throw ValidationError("--branch-simulator cannot be combined with --destination or --device.")
+        }
+        if !branchSimulator && destination == nil {
+            throw ValidationError("Pass --destination or --branch-simulator.")
+        }
+        if !branchSimulator && (deviceType != "latest" || runtime != "latest") {
+            throw ValidationError("--device-type and --runtime require --branch-simulator.")
+        }
     }
 
     mutating func run() async throws {
         RunStore.shared.pruneOrphaned()
         let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json, quiet: quiet)
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
+        let selection = branchSimulator ? SimulatorSelection(deviceType: deviceType, runtime: runtime) : nil
 
         do {
             if delegate {
@@ -50,8 +69,9 @@ struct RunCommand: AsyncParsableCommand {
                 let run = try await env.delegateRun(
                     branch: branch,
                     scheme: scheme,
-                    destination: destination,
-                    kindFilter: kindFilter
+                    destination: destination ?? "",
+                    kindFilter: kindFilter,
+                    simulatorSelection: selection
                 )
                 env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName) · run \(run.id)")
                 env.emitResult(status: "delegated", exitCode: 0)
@@ -63,10 +83,11 @@ struct RunCommand: AsyncParsableCommand {
                 try await env.performRun(
                     branch: branch,
                     scheme: scheme,
-                    destination: destination,
+                    destination: destination ?? "",
                     kindFilter: kindFilter,
                     timeout: timeout,
-                    detached: false
+                    detached: false,
+                    simulatorSelection: selection
                 )
             }
         } catch let error as SelectionError {
