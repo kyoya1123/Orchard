@@ -122,13 +122,24 @@ public struct WorktreeContextResolver: Sendable {
             .sorted(by: sortWorktrees)
     }
 
-    public func resolve(fromConfiguredDirectoryURLs directoryURLs: [URL]) async -> [WorktreeContext] {
+    public func resolve(fromConfiguredDirectoryURLs directoryURLs: [URL],
+                        registeredRepositories: [RegisteredRepository] = []) async -> [WorktreeContext] {
         var buckets: [String: (project: XcodeProject, gitInfo: GitInfo?, contexts: [TerminalContext], source: String)] = [:]
         var repositoryRoots = Set<URL>()
+        var nestedProjectDirectories: [URL: Set<String>] = [:]
 
-        for directoryURL in directoryURLs {
-            if let gitInfo = await gitService.info(from: directoryURL) {
+        for directoryURL in directoryURLs.map({ $0.resolvingSymlinksInPath().standardizedFileURL }) {
+            let gitInfo = await gitService.info(from: directoryURL)
+            if let gitInfo {
                 repositoryRoots.insert(gitInfo.rootURL)
+            }
+            // Preserve an explicit nested project (and non-Git projects).
+            if let project = try? projectDetector.detect(from: directoryURL) {
+                add(project: project, gitInfo: await gitService.info(from: project.rootURL), context: nil,
+                    sourceDescription: "configured", to: &buckets)
+                if let root = gitInfo?.rootURL, project.rootURL.path.hasPrefix(root.path + "/") {
+                    nestedProjectDirectories[root, default: []].insert(String(project.rootURL.path.dropFirst(root.path.count + 1)))
+                }
             }
 
             for repositoryRoot in repositoryRootCandidates(inside: directoryURL) {
@@ -140,7 +151,11 @@ public struct WorktreeContextResolver: Sendable {
             let worktreeRoots = await gitService.worktreeRootURLs(from: repositoryRoot)
             let candidateRoots = worktreeRoots.isEmpty ? [repositoryRoot] : worktreeRoots
 
-            for candidateRoot in candidateRoots + worktreeCandidateURLs(near: repositoryRoot) {
+            let roots = candidateRoots + worktreeCandidateURLs(near: repositoryRoot)
+            let projectCandidates = roots + roots.flatMap { root in
+                (nestedProjectDirectories[repositoryRoot] ?? []).map { root.appendingPathComponent($0) }
+            }
+            for candidateRoot in projectCandidates {
                 guard let project = try? projectDetector.detect(from: candidateRoot) else {
                     continue
                 }
@@ -153,6 +168,17 @@ public struct WorktreeContextResolver: Sendable {
                     sourceDescription: "configured",
                     to: &buckets
                 )
+            }
+        }
+
+        for repository in registeredRepositories {
+            for directory in await repository.projectDirectoryURLs() {
+                // A removed nested project must not accidentally select an
+                // unrelated project above this worktree.
+                guard let project = try? projectDetector.detect(from: directory),
+                      project.rootURL.standardizedFileURL.path == directory.standardizedFileURL.path else { continue }
+                add(project: project, gitInfo: await gitService.info(from: directory), context: nil,
+                    sourceDescription: "CLI", to: &buckets)
             }
         }
 

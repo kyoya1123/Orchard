@@ -85,6 +85,7 @@ struct RunJobGroup: Identifiable {
 @MainActor
 final class RunnerViewModel: ObservableObject {
     @Published var configuredDirectoryPaths: [String] = []
+    @Published private(set) var registeredRepositories: [RegisteredRepository] = []
     @Published var worktrees: [WorktreeContext] = []
     @Published var selectedWorktreeID: String?
     @Published var schemes: [String] = []
@@ -129,6 +130,10 @@ final class RunnerViewModel: ObservableObject {
     // (only while the menu is open), this runs for the app's whole life so the
     // GUI executes delegated runs even when the popover is closed.
     private var requestWatcher: RunStoreWatcher?
+    private let repositoryRegistry = RepositoryRegistry()
+    private var repositoryWatcher: RunStoreWatcher?
+    private var refreshInProgress = false
+    private var refreshPending = false
     // Tombstones for CLI runs the user dismissed via Close. A running CLI run
     // keeps rewriting its record, so without this it would reappear on the next
     // sync. Entries are forgotten once their record actually leaves the store.
@@ -159,7 +164,31 @@ final class RunnerViewModel: ObservableObject {
         schemeCache = UserDefaults.standard.dictionary(forKey: schemeCacheKey) as? [String: [String]] ?? [:]
 
         startRequestWatcher()
+        Task { await startRepositoryWatcher() }
         BackgroundCleanup.schedule()
+    }
+
+    private func startRepositoryWatcher() async {
+        do {
+            try await repositoryRegistry.prepare()
+            repositoryWatcher = RunStoreWatcher(directory: repositoryRegistry.recordsDirectory) { [weak self] in
+                Task { @MainActor in await self?.repositoriesChanged() }
+            }
+            repositoryWatcher?.start()
+            // Watch first, then load, so CLI writes during startup aren't lost.
+            await repositoriesChanged()
+        } catch {
+            appendAppLog("Could not watch CLI projects: \(error.localizedDescription)\n")
+        }
+    }
+
+    private func repositoriesChanged() async {
+        do {
+            let current = try await repositoryRegistry.load()
+            if current != registeredRepositories { await refresh() }
+        } catch {
+            appendAppLog("Could not read CLI projects: \(error.localizedDescription)\n")
+        }
     }
 
     /// Watches for CLI-delegated run requests and executes them as GUI runs.
@@ -291,6 +320,10 @@ final class RunnerViewModel: ObservableObject {
         configuredDirectoryPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
     }
 
+    var hasProjectSources: Bool {
+        !configuredDirectoryPaths.isEmpty || !registeredRepositories.isEmpty
+    }
+
     func addConfiguredDirectory(_ url: URL) {
         let path = url.standardizedFileURL.path
         guard !configuredDirectoryPaths.contains(path) else { return }
@@ -333,6 +366,18 @@ final class RunnerViewModel: ObservableObject {
     }
 
     func refresh() async {
+        // Coalesce manual refreshes and registry events. An older discovery
+        // must never overwrite a later CLI registration.
+        guard !refreshInProgress else { refreshPending = true; return }
+        refreshInProgress = true
+        defer { refreshInProgress = false }
+        repeat {
+            refreshPending = false
+            await refreshOnce()
+        } while refreshPending
+    }
+
+    private func refreshOnce() async {
         status = "Refreshing"
         // Show the loading state only on a cold start. With cached data the
         // refresh runs silently in the background and swaps results in.
@@ -342,9 +387,14 @@ final class RunnerViewModel: ObservableObject {
         defer { isRefreshing = false }
 
         do {
+            do { registeredRepositories = try await repositoryRegistry.load() }
+            catch { appendAppLog("Could not read CLI projects: \(error.localizedDescription)\n") }
+            if !registeredRepositories.isEmpty && !didCompleteOnboarding { completeOnboarding() }
             let configuredDirectoryURLs = configuredDirectoryURLs
+            let registeredRepositories = registeredRepositories
             async let resolvedWorktrees = worktreeContextResolver.resolve(
-                fromConfiguredDirectoryURLs: configuredDirectoryURLs
+                fromConfiguredDirectoryURLs: configuredDirectoryURLs,
+                registeredRepositories: registeredRepositories
             )
             async let loadedDestinations = xcodeService.destinations()
 
@@ -359,8 +409,8 @@ final class RunnerViewModel: ObservableObject {
             removeJobsForDeletedProjects()
 
             try await reloadSchemesForSelectedWorktree()
-            if configuredDirectoryPaths.isEmpty {
-                status = "Add a directory to scan"
+            if !hasProjectSources {
+                status = "Run Orchard from a project or add a directory"
             } else {
                 status = worktrees.isEmpty ? "No Xcode worktrees found" : "Ready"
             }

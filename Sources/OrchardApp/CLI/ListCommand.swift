@@ -43,7 +43,7 @@ struct ListBranches: AsyncParsableCommand {
         if directories.json {
             printJSON(rows)
         } else if rows.isEmpty {
-            FileHandle.standardError.write(Data("No worktrees found. Configure directories in the GUI or pass --dir.\n".utf8))
+            FileHandle.standardError.write(Data("No worktrees found. Run from an Xcode project or pass --dir.\n".utf8))
         } else {
             for row in rows {
                 print("\(row.branch)\t\(row.project)\t\(row.path)")

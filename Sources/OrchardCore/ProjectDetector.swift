@@ -4,7 +4,7 @@ public struct ProjectDetector: Sendable {
     public init() {}
 
     public func detect(from workingDirectoryURL: URL) throws -> XcodeProject {
-        var currentURL = workingDirectoryURL.standardizedFileURL
+        var currentURL = workingDirectoryURL.resolvingSymlinksInPath().standardizedFileURL
         let fileManager = FileManager.default
 
         while true {

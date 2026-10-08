@@ -33,7 +33,7 @@ struct RunnerMenuView: View {
             } else {
                 header
                 Divider()
-                if model.configuredDirectoryPaths.isEmpty {
+                if !model.hasProjectSources {
                     emptyDirectoriesView
                 } else {
                     controlsSection
@@ -112,7 +112,7 @@ struct RunnerMenuView: View {
                     .font(.title2)
                     .bold()
 
-                Text("Orchard scans directories for Xcode projects and Git worktrees so you can build and run any branch. Add a repository or a parent folder to get started.")
+                Text("Projects used from the Orchard CLI appear here automatically, together with their Git worktrees. You can also add a repository or parent folder manually.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -177,7 +177,6 @@ struct RunnerMenuView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(model.configuredDirectoryPaths.isEmpty)
         }
     }
 
@@ -509,10 +508,10 @@ struct RunnerMenuView: View {
 
     private var emptyDirectoriesView: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("No Scan Directories", systemImage: "folder.badge.questionmark")
+            Label("No Projects Yet", systemImage: "folder.badge.questionmark")
                 .font(.headline)
 
-            Text("Add a repository or parent directory to discover projects and worktrees.")
+            Text("Run Orchard from an Xcode project to add it automatically, or add a directory below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -529,8 +528,10 @@ struct RunnerMenuView: View {
 
     private var settingsView: some View {
         VStack(alignment: .leading, spacing: 12) {
+            RegisteredRepositoriesView(repositories: model.registeredRepositories)
+            Divider()
             HStack {
-                Text("Scan Directories")
+                Text("Additional Directories")
                     .font(.headline)
 
                 Spacer()
@@ -543,7 +544,7 @@ struct RunnerMenuView: View {
             }
 
             if model.configuredDirectoryPaths.isEmpty {
-                Text("No directories configured.")
+                Text("No additional directories. CLI projects are added automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

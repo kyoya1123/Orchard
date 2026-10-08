@@ -21,6 +21,7 @@ struct SimulatorOptions: ParsableArguments {
 
     func prepare(name: String?) async throws {
         let project = name == nil ? nil : try? ProjectDetector().detect(from: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        if let project { await CLIEnvironment.register(project: project) }
         let result = try await SimulatorBaseService().prepare(
             name: name, selection: .init(deviceType: deviceType, runtime: runtime), project: project,
             progress: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
