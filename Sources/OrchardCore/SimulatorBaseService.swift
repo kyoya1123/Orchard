@@ -260,7 +260,7 @@ enum SimulatorProcess {
     }
 
     static func execute(executable: String, arguments: [String], timeout: TimeInterval,
-                        background: Bool = false) async throws -> String {
+                        background: Bool = false, processQualityOfService: QualityOfService? = nil) async throws -> String {
         let control = SimulatorProcessControl()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -279,7 +279,7 @@ enum SimulatorProcess {
                         let process = Process()
                         process.executableURL = URL(fileURLWithPath: executable)
                         process.arguments = arguments
-                        process.qualityOfService = background ? .background : .userInitiated
+                        process.qualityOfService = processQualityOfService ?? (background ? .background : .userInitiated)
                         process.standardOutput = out
                         process.standardError = err
                         try control.start(process)

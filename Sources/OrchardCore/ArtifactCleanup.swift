@@ -39,7 +39,11 @@ public struct ArtifactCleanup: Sendable {
     init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
          command: @escaping Command = { executable, arguments in
-             try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60, background: true)
+             // CoreSimulator IPC can stall even for `list` at background QoS.
+             // Keep the worker/queue at low priority; only its short simctl
+             // client uses utility QoS. Filesystem collection remains throttled.
+             try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60,
+                 background: true, processQualityOfService: executable == "/usr/bin/xcrun" ? .utility : nil)
          }) {
         self.store = store
         self.derivedData = derivedData
