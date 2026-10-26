@@ -9,6 +9,8 @@ public struct CleanupReport: Codable, Sendable {
         public var name: String? = nil
         public var lastUsedAt: String? = nil
         public var estimatedBytes: Int64? = nil
+        public var state: String? = nil
+        public var requiresShutdown: Bool? = nil
     }
     public var actions: [Action] = []
     public var alreadyRunning = false
@@ -192,9 +194,10 @@ public struct ArtifactCleanup: Sendable {
         guard FileManager.default.fileExists(atPath: root.path) else { return true }
         for checkout in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey]) {
             guard try checkout.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { return false }
+            // Matching mode reports even empty ignored directories such as Xcode's .swiftpm/xcode.
             let status = try await command("/usr/bin/git", ["--no-optional-locks", "-C", checkout.path,
                 "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all",
-                "--ignored=matching", "--ignore-submodules=none"])
+                "--ignored=traditional", "--ignore-submodules=none"])
             if !status.isEmpty { return false }
         }
         return true
@@ -324,7 +327,9 @@ public struct ArtifactCleanup: Sendable {
     private func simulatorReason(_ record: ArtifactSimulator, device: Device) async throws -> String? {
         guard !record.owners.isEmpty else { return nil }
         if try record.owners.allSatisfy({ try !worktreeExists($0) }) { return "missing-worktree" }
-        if let lastUse = lastUse(record, device), lastUse < now().timeIntervalSince1970 - Self.simulatorRetention {
+        // A device still booted is in current use, regardless of how old its
+        // boot timestamp is. Only independently obsolete owners qualify it.
+        if device.state == "Shutdown", let lastUse = lastUse(record, device), lastUse < now().timeIntervalSince1970 - Self.simulatorRetention {
             return "unused-over-1-day"
         }
         // No fetch/prune or GitHub requests. Missing refs, detached HEAD,
@@ -336,27 +341,85 @@ public struct ArtifactCleanup: Sendable {
     }
 
     struct ExternalUsage {
+        struct OpenFile { let pid: Int?; let path: String }
         let buildRunning: Bool
-        let openPaths: [String]
+        let processes: [Int: String]
+        let files: [OpenFile]
+        let simulatorSessions: [String]
         func contains(_ paths: [String]) -> Bool {
-            buildRunning || openPaths.contains { file in paths.contains { ArtifactCleanup.contains(file, in: $0) } }
+            buildRunning || files.contains { file in paths.contains { ArtifactCleanup.contains(file.path, in: $0) } }
+        }
+
+        func usesSimulator(_ device: Device, root: URL, owners: Set<ArtifactOwner>) -> Bool {
+            if contains(owners.map(\.worktreePath)) { return true }
+            if simulatorSessions.contains(where: { $0.isEmpty || $0 == device.udid.lowercased() }) { return true }
+            let path = root.appendingPathComponent(device.udid).path
+            return files.contains { file in
+                guard ArtifactCleanup.contains(file.path, in: path) else { return false }
+                // Shutdown devices keep the conservative open-file check.
+                // Booted devices necessarily have OS processes opening files;
+                // ignore only known system executables, never installed apps,
+                // consoles, debuggers, unknown processes or worktree users.
+                guard device.state == "Booted", let pid = file.pid, let executable = processes[pid] else { return true }
+                return !ArtifactCleanup.isSimulatorSystemExecutable(executable)
+            }
         }
     }
 
-    private func externalUsage() async throws -> ExternalUsage {
-        let processes = try await command("/bin/ps", ["-axo", "pid=,comm="])
-        let buildRunning = processes.split(separator: "\n").contains(where: {
-            let name = URL(fileURLWithPath: String($0.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).last ?? "")).lastPathComponent
-            return ["xcodebuild", "XCBBuildService", "XCBuildService", "SWBBuildService"].contains(name)
-        })
-        if buildRunning { return ExternalUsage(buildRunning: true, openPaths: []) }
-        let files = try await command("/usr/sbin/lsof", ["-nP", "-F", "n"])
-        return ExternalUsage(buildRunning: false, openPaths: files.split(separator: "\n")
-            .filter { $0.hasPrefix("n") }.map { String($0.dropFirst()) })
+    static func isSimulatorSystemExecutable(_ executable: String) -> Bool {
+        let path = URL(fileURLWithPath: executable).standardizedFileURL.path
+        if path.hasPrefix("/Library/Developer/CoreSimulator/Volumes/"),
+           let range = path.range(of: ".simruntime/Contents/Resources/RuntimeRoot/") {
+            let relative = path[range.upperBound...]
+            return ["System/", "usr/", "bin/", "sbin/", "Applications/"].contains { relative.hasPrefix($0) }
+        }
+        // Known macOS helpers that also open Simulator data.
+        // Unknown helpers remain a reason to defer, rather than widening this
+        // to every Apple executable or every process named like a system daemon.
+        return [
+            "/usr/libexec/pkd",
+            "/System/Library/Frameworks/StoreKit.framework/Support/storekitd",
+            "/Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex/Contents/MacOS/DeviceFS",
+            "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/launchd_sim",
+            "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/com.apple.CoreSimulator.CoreSimulatorService.xpc/Contents/MacOS/com.apple.CoreSimulator.CoreSimulatorService"
+        ].contains(path)
     }
 
-    private func simulatorPaths(_ device: Device, _ owners: Set<ArtifactOwner>) -> [String] {
-        [devices.appendingPathComponent(device.udid).path] + owners.map(\.worktreePath)
+    private func externalUsage() async throws -> ExternalUsage {
+        let listing = try await command("/bin/ps", ["-axo", "pid=,comm="])
+        var processes: [Int: String] = [:]
+        for line in listing.split(separator: "\n") {
+            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 2, let pid = Int(fields[0]) else { continue }
+            processes[pid] = String(fields[1])
+        }
+        let buildRunning = processes.values.contains {
+            ["xcodebuild", "XCBBuildService", "XCBuildService", "SWBBuildService"]
+                .contains(URL(fileURLWithPath: $0).lastPathComponent)
+        }
+        if buildRunning { return ExternalUsage(buildRunning: true, processes: processes, files: [], simulatorSessions: []) }
+        var sessions: [String] = processes.values.contains {
+            ["lldb", "debugserver", "lldb-rpc-server"].contains(URL(fileURLWithPath: $0).lastPathComponent)
+        } ? [""] : []
+        let simctlPIDs = processes.filter { URL(fileURLWithPath: $0.value).lastPathComponent == "simctl" }.keys.sorted()
+        if !simctlPIDs.isEmpty {
+            let arguments = try await command("/bin/ps", ["-ww", "-p", simctlPIDs.map(String.init).joined(separator: ","), "-o", "args="])
+            for line in arguments.split(separator: "\n") {
+                let ids = line.split(whereSeparator: { $0.isWhitespace }).filter { UUID(uuidString: String($0)) != nil }
+                // Commands addressing "booted" or whose target is unknown are
+                // conservatively busy; never interrupt a console/log session.
+                sessions.append(contentsOf: ids.isEmpty ? [""] : ids.map { $0.lowercased() })
+            }
+            if sessions.isEmpty { sessions = [""] }
+        }
+        let listingFiles = try await command("/usr/sbin/lsof", ["-nP", "-F", "pn"])
+        var pid: Int?
+        var files: [ExternalUsage.OpenFile] = []
+        for line in listingFiles.split(separator: "\n") {
+            if line.hasPrefix("p") { pid = Int(line.dropFirst()) }
+            else if line.hasPrefix("n") { files.append(.init(pid: pid, path: String(line.dropFirst()))) }
+        }
+        return ExternalUsage(buildRunning: false, processes: processes, files: files, simulatorSessions: sessions)
     }
 
     private func cleanSimulators(settings: Settings, apply: Bool, report: inout CleanupReport) async throws {
@@ -368,19 +431,22 @@ public struct ArtifactCleanup: Sendable {
             var current: Device?
             var deletionRequested = false
             var deletionConfirmed = false
+            var shutdownRequested = false
+            var shutdownConfirmed = false
             func action(_ reason: String, _ outcome: String) -> CleanupReport.Action {
                 .init(target: entry.udid, reason: reason, outcome: outcome, name: entry.name,
                       lastUsedAt: current.flatMap { lastUse(entry, $0) }
                         .map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) },
-                      estimatedBytes: current?.dataPathSize)
+                      estimatedBytes: current?.dataPathSize, state: current?.state,
+                      requiresShutdown: current.map { $0.state == "Booted" })
             }
             do {
                 guard UUID(uuidString: entry.udid) != nil, !ArtifactStore.isStandardSimulator(entry.name),
                       !entry.owners.contains(where: { excluded($0, settings: settings) }),
                       let initial = inventory.first(where: { $0.udid == entry.udid }), initial.name == entry.name else { continue }
                 current = initial
-                guard initial.state == "Shutdown" else {
-                    report.actions.append(action("booted-or-transitioning", "preserved")); continue
+                guard ["Shutdown", "Booted"].contains(initial.state) else {
+                    report.actions.append(action("transitioning-or-unknown-state", "preserved")); continue
                 }
                 var leases: [ArtifactLease] = []
                 defer { leases.forEach { $0.close() } }
@@ -398,23 +464,41 @@ public struct ArtifactCleanup: Sendable {
                       record.owners == entry.owners, record.name == entry.name,
                       let device = try await (apply ? deviceList() : inventory).first(where: { $0.udid == entry.udid }), device.name == record.name else { continue }
                 current = device
-                guard device.state == "Shutdown" else {
-                    report.actions.append(action("booted-or-transitioning", "preserved")); continue
+                guard device.state == initial.state, lastUse(record, device) == lastUse(record, initial) else {
+                    report.actions.append(action("usage-changed", "preserved")); continue
                 }
                 guard let reason = try await simulatorReason(record, device: device) else {
-                    report.actions.append(action(lastUse(record, device) == nil ? "unknown-last-use" : "recent-or-unmerged", "preserved")); continue
+                    report.actions.append(action(device.state == "Booted" ? "booted-with-live-unmerged-owner" :
+                        (lastUse(record, device) == nil ? "unknown-last-use" : "recent-or-unmerged"), "preserved")); continue
                 }
-                guard !usage.contains(simulatorPaths(device, record.owners)) else {
+                guard !usage.usesSimulator(device, root: devices, owners: record.owners) else {
                     report.actions.append(action("external-use", "preserved")); continue
                 }
                 if apply {
-                    // Never shutdown a device. Check usage and state again after
-                    // subprocesses, immediately before the supported per-device delete.
-                    guard try await !externalUsage().contains(simulatorPaths(device, record.owners)),
-                          let stopped = try await deviceList().first(where: { $0.udid == device.udid }),
-                          stopped.state == "Shutdown", stopped.name == record.name,
-                          try await simulatorReason(record, device: stopped) == reason else {
+                    guard try await !externalUsage().usesSimulator(device, root: devices, owners: record.owners),
+                          let fresh = try await deviceList().first(where: { $0.udid == device.udid }),
+                          fresh.state == device.state, fresh.name == record.name,
+                          lastUse(record, fresh) == lastUse(record, device),
+                          try await simulatorReason(record, device: fresh) == reason else {
                         report.actions.append(action("usage-changed", "preserved")); continue
+                    }
+                    if fresh.state == "Booted" {
+                        shutdownRequested = true
+                        _ = try await simctl(["shutdown", fresh.udid])
+                        guard let stopped = try await deviceList().first(where: { $0.udid == fresh.udid }),
+                              stopped.state == "Shutdown", stopped.name == record.name else {
+                            throw OrchardError.message("Shutdown is not confirmed; not retrying")
+                        }
+                        shutdownConfirmed = true
+                        // Shutdown updates lastUsedAt. Ownership/merge evidence
+                        // must still qualify; newly started use cancels deletion.
+                        guard try await !externalUsage().usesSimulator(stopped, root: devices, owners: record.owners),
+                              let final = try await deviceList().first(where: { $0.udid == stopped.udid }),
+                              final.state == "Shutdown", final.name == record.name,
+                              lastUse(record, final) == lastUse(record, stopped),
+                              try await simulatorReason(record, device: final) == reason else {
+                            report.actions.append(action("usage-changed-after-shutdown", "stopped-preserved")); continue
+                        }
                     }
                     deletionRequested = true
                     _ = try await simctl(["delete", device.udid])
@@ -428,7 +512,8 @@ public struct ArtifactCleanup: Sendable {
             } catch {
                 if current != nil {
                     report.actions.append(action(String(describing: error),
-                        deletionConfirmed ? "removed" : (deletionRequested ? "unconfirmed" : "preserved")))
+                        deletionConfirmed ? "removed" : (deletionRequested ? "unconfirmed" :
+                            (shutdownConfirmed ? "stopped-preserved" : (shutdownRequested ? "shutdown-unconfirmed" : "preserved")))))
                 }
             }
         }
