@@ -44,18 +44,31 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 
 Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使います。同じプロジェクトへの GUI / CLI のコマンドは成果物確認まで順番に実行し、別 worktree の並列ビルドは維持します。標準の DerivedData のビルド先は変わりません。依存解決・ビルドが成功し、固定された Git checkout が未変更で、バイナリの参照先も複製内に収まる場合だけテンプレートを公開します。ローカル・Registry パッケージや未対応の lockfile 形式では通常の Xcode の動作を使います。clone が失敗した場合も通常の依存解決へ戻り、通常コピーによる容量消費は行いません。
 
-新しい worktree での容量増加を抑える機能です。既存の Build 成果物や Simulator データは削減しません。このSPM共有処理は既存の依存フォルダや worktree ごとの編集内容を削除しません。別のバックグラウンド整理処理は期限切れのDerivedDataを削除しますが、変更されたパッケージcheckoutは保護します。無効化する場合は `ORCHARD_SPM_CACHE=0` を設定して Orchard / CLI を起動してください。ビルド停止後に `templates/` 配下を削除すると不要なテンプレートを回収できます。`worktrees/` 配下には編集内容が残る可能性があるため、削除前に確認が必要です。
+新しい worktree での容量増加を抑える機能です。既存の Build 成果物や Simulator データは削減しません。ビルド中のSPM共有処理は依存フォルダを削除しません。管理対象キャッシュに所有元と依存バージョンを記録し、別の整理処理でworktree消失と未変更の依存物を確認できた場合だけ回収します。記録のない既存キャッシュ、存在するworktreeのキャッシュ、手編集した依存物は保持します。無効化する場合は `ORCHARD_SPM_CACHE=0` を設定して Orchard / CLI を起動してください。ビルド停止後に `templates/` 配下を削除すると不要なテンプレートを回収できます。`worktrees/` 配下には編集内容が残る可能性があるため、削除前に確認が必要です。
 
 ## バックグラウンドでの整理
 
 Orchardの起動時、ブランチ用Simulatorの準備時、依存解決・ビルドの前後に不要な成果物を確認します。整理はCPU・ディスクI/Oの優先度を下げた別プロセスで動かし、UIスレッドでは待機しません。同時に複数回呼ばれても、プロセス間ロックで整理を1つにまとめます。
 
-- 対応するworktreeのディレクトリが存在しない、または最終利用から**7日間**経過したSimulator・DerivedDataを削除対象にします。一覧の再検出では利用日時を更新しません。
-- 対象のSimulatorは起動中でも終了して削除します。標準名の端末、専用base、名前を変更した端末、所有者が分からない端末は保護します。
-- Orchardのビルド・Simulator準備・インストール中はロックで保護します。コンソール接続だけでは、worktree消失後の端末を保持し続けません。外部の`xcodebuild`が実行中、Xcodeのビルドサービスが当該DerivedDataを開いている、またはパッケージcheckoutにローカル変更がある場合もDerivedDataの削除を見送ります。
-- worktree自体、Gitブランチ、ソースファイルは削除しません。記録したプロジェクトのパスと設定済みリポジトリから所有者を特定し、Codexなど外部にあるworktreeも対象にします。既に消えた外部worktreeは過去の対応記録が必要で、名前だけから所有者を推測しません。
+- ブランチ用Simulatorは、記録されたworktreeが消失した場合、または最終利用から**1日を超えた**場合に候補になります。CoreSimulatorのlastUsedAt・lastBootedAtとOrchardの利用記録のうち新しい日時を使い、ファイルのmtimeでは判定しません。日時不明なら年齢条件では削除しません。
+- 全ての現存所有元が、ローカルに保存されたorigin/HEADの履歴へ取り込み済みのcleanな非デフォルトブランチである場合も候補です。正規化したブランチ名とSimulator名の一致を確認し、別ブランチに再利用されたworktreeを誤判定しません。GitHubの最新PR状態は問い合わせず、fetch・prune・Gitの変更も行いません。squash mergeは検出できない場合があります。
+- **起動中・状態遷移中のSimulatorは常に保持**し、cleanupから停止しません。標準名端末、専用base、名前を変更した端末、所有者不明の端末も保護します。
+- Orchardのビルド・準備・インストールは排他ロックで保護します。外部ビルド、worktreeやSimulator内のファイルを開いているプロセスも確認し、削除直前に再検証します。開いたままのシェルやコンソール接続により、保守的に整理を見送る場合があります。
+- DerivedDataの保持期間は従来の**7日間**です。worktree消失も対象ですが、使用中や変更された依存物は保持します。worktree自体、ブランチ、ソースは削除しません。
+- 管理するSourcePackagesは、対応する所有記録・固定バージョンと一致し、worktreeが消失し、使用中でなく、checkoutに編集・ローカルcommit・未追跡ファイル等がない場合だけ回収します。未知のファイルや検査エラーがあれば保持します。既存キャッシュは更新版で次に利用した際に所有記録を持ちます。記録のないものをハッシュだけで推測して削除しません。
 
-`orchard cleanup --json`で削除候補を確認できます。このコマンドではSimulator停止や成果物の削除を行いません。明示的に整理する場合は`orchard cleanup --apply`を使います。所有者と直近の結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。特定プロジェクトを除外するには、このディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。
+`orchard cleanup --json`で候補を確認します。名前・UDID・最終利用日時・容量の目安・削除または保持する理由を表示し、成果物は削除しません。ただし所有記録、レポート、ロックファイルは更新する場合があります。容量表示にはAPFS共有ブロックが重複して含まれ得るため、実回収量は別途空き容量で確認してください。
+
+対象は`--scope simulators`、`--scope derived-data`、`--scope source-packages`で限定できます（既定all）。`--no-discover`は既存の所有記録だけを使用します。
+
+```sh
+orchard cleanup --scope simulators --no-discover
+orchard cleanup --scope simulators --no-discover --apply
+```
+
+`--apply`は実際に削除します。Simulator内のアプリや保存データも失われます。Go・Gradle・npm、DeviceSupport、Simulatorランタイムはこの整理処理の対象外です。
+
+所有記録と結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は同ディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。
 
 これは保持期間の制御で、容量の上限ではありません。削除した成果物は次回利用時に再ビルドします。cronやLaunchAgentの登録は不要です。Orchardを使わない間は整理せず、次の利用時に実行します。
 

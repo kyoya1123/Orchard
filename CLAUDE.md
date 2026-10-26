@@ -201,7 +201,9 @@ open Orchard.app
 
 ## Background artifact collection
 
-- `ArtifactActivity` records worktree ownership and holds shared process leases through build/install. Release before console attachment; console lifetime must not pin an orphan Simulator.
-- `ArtifactCleanup` deletes only attributable DerivedData and named branch Simulators when the owner directory is absent or the latest activity is seven days old. Never infer simulator ownership from a branch-shaped name. Standard devices/private bases, exclusions and modified package checkouts remain protected.
+- `ArtifactActivity` records worktree ownership and holds shared process leases through build/install. Release before console attachment; the collector separately checks external processes and may defer while a console or worktree session remains open.
+- `ArtifactCleanup` keeps DerivedData's seven-day/missing-owner policy. Owned branch Simulators must be shut down and unused for more than one day, orphaned, or verified merged using clean matching branch names and cached default-branch ancestry. CoreSimulator/Orchard usage metadata establishes age, never filesystem mtimes. Booted/transitioning devices, external builds and open owner/device paths are preserved; never shutdown during cleanup. Names alone do not establish ownership.
+- Managed SourcePackages require an owner/pin receipt and known project, a missing worktree, free build/cache leases, and unchanged pinned checkouts. Keep legacy caches with no receipt, live-worktree caches, unknown files and manual edits. Templates remain bounded separately. Go/Gradle/npm, DeviceSupport and runtimes are outside this collector.
+- CLI cleanup supports scope all/simulators/derived-data/source-packages and --no-discover. Preview does not delete artifacts but may update ownership/report metadata. Recheck state and external use before deletion; report uncertain deletion outcomes without retrying.
 - `cleanup-worker` is a hidden CLI entry point spawned independently at background CPU/I/O priority. Its exclusive worker lock prevents overlaps; per-project/device exclusive try-locks skip active operations. DerivedData is moved aside under the lock before slow deletion.
 - Keep all filesystem scans and deletion out of `MainActor`. Do not add periodic GUI timers or mutate existing worktrees. Test cleanup with injected paths and simulated commands.

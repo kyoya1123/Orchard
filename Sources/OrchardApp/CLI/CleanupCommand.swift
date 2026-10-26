@@ -6,15 +6,23 @@ import OrchardCore
 struct CleanupCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "cleanup",
         abstract: "Inspect unused worktree Simulators and DerivedData. Pass --apply to remove them.")
-    @Flag(name: .long, help: "Delete owned artifacts whose worktree is gone or which have been unused for seven days.")
+    @Flag(name: .long, help: "Apply the inspected cleanup policy. Simulator deletion permanently removes its apps and data.")
     var apply = false
+    @Option(name: .long, help: "all, simulators, derived-data, or source-packages. Defaults to all.")
+    var scope = "all"
+    @Flag(name: .long, help: "Use existing ownership records without discovering additional projects.")
+    var noDiscover = false
     @OptionGroup var directories: DirectoryOptions
 
     mutating func run() async throws {
         let paths = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json).directoryURLs
+        guard let selectedScope = ArtifactCleanup.Scope(rawValue: scope) else {
+            throw ValidationError("Unknown cleanup scope: \(scope)")
+        }
         let shouldApply = apply
+        let shouldDiscover = !noDiscover
         let report = await Task.detached(priority: .background) {
-            await ArtifactCleanup().run(apply: shouldApply, directories: paths)
+            await ArtifactCleanup().run(apply: shouldApply, directories: paths, discover: shouldDiscover, scope: selectedScope)
         }.value
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

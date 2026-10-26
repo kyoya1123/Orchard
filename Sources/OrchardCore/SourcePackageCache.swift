@@ -46,11 +46,11 @@ public struct SourcePackageCache: Sendable {
             return try await operation([])
         }
         guard let context else { return try await operation([]) }
-        return try await withCache(context: context, checkCancellation: checkCancellation, log: log, operation: operation)
+        return try await withCache(context: context, owner: activity?.owner, checkCancellation: checkCancellation, log: log, operation: operation)
     }
 
     func withCache<Value: Sendable>(
-        context: Context,
+        context: Context, owner: ArtifactOwner? = nil,
         checkCancellation: @Sendable () throws -> Void = {},
         log: @Sendable (String) -> Void = { _ in },
         operation: @Sendable ([String]) async throws -> Value
@@ -60,6 +60,14 @@ public struct SourcePackageCache: Sendable {
         defer { lease.unlock() }
         try Task.checkCancellation()
         try checkCancellation()
+        if let owner {
+            let managed = context.repositoryCache.appendingPathComponent("worktrees/\(ArtifactStore.key(owner.projectPath))/SourcePackages")
+            if context.packages.standardizedFileURL.path == managed.standardizedFileURL.path {
+                let receipt = SourcePackageOwnership(owner: owner, repositoryCacheID: context.repositoryCache.lastPathComponent,
+                                                     resolved: context.resolved)
+                try ArtifactStore().write(receipt, to: managed.deletingLastPathComponent().appendingPathComponent("owner.json"))
+            }
+        }
         do {
             try await prepare(context, checkCancellation: checkCancellation, log: log)
         } catch {
@@ -201,7 +209,8 @@ public struct SourcePackageCache: Sendable {
         try Self.rebase(packages, from: packages, to: context.template.appendingPathComponent("SourcePackages"))
         try FileManager.default.moveItem(at: stage, to: context.template)
         // Only immutable snapshots owned by this service are bounded. Worktree
-        // checkouts (possibly edited) and Xcode's caches are never collected.
+        // checkouts are reclaimed separately only with verified ownership, a missing
+        // worktree and unmodified pinned dependencies. Xcode caches are separate.
         let templates = try FileManager.default.contentsOfDirectory(
             at: parent, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
         ).filter { $0.lastPathComponent.count == 64 }
@@ -405,9 +414,12 @@ public struct SourcePackageCache: Sendable {
               let object = json["object"] as? [String: Any],
               let dependencies = object["dependencies"] as? [[String: Any]],
               dependencies.count == expected.count else { throw OrchardError.message("SPM state does not match pins") }
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = canonicalRoot.hasSuffix("/") ? canonicalRoot : canonicalRoot + "/"
         for artifact in object["artifacts"] as? [[String: Any]] ?? [] {
             guard let path = artifact["path"] as? String,
-                  path.hasPrefix(root.path + "/"), FileManager.default.fileExists(atPath: path) else {
+                  URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(prefix),
+                  FileManager.default.fileExists(atPath: path) else {
                 throw OrchardError.message("SPM artifact is missing or outside the snapshot")
             }
         }
