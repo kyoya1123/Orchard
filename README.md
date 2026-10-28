@@ -52,7 +52,11 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 
 ## Background artifact cleanup
 
-Orchard checks for unused artifacts when the app starts, when preparing a branch Simulator, and around package/build operations. Collection runs in a separate background process with low CPU and disk I/O priority. It never waits on the UI thread, and a process lock coalesces overlapping requests.
+Orchard checks archived worktree devices at app startup/reopen, on GUI runs, and on each `run`, `list`, `runs`, or `simulator` CLI invocation. Help and cleanup previews do not schedule deletion. Checks use recorded ownership and run in a separate background process with low CPU and disk I/O priority. Concurrent requests are coalesced; requests arriving during collection receive another pass. Lock waits and busy retries have deadlines, and failed requests remain pending for a future invocation.
+
+Automatic checks use only the `archived-devices` scope (iOS and Android). Claude/Codex lifecycle metadata must establish that every matching owner is archived. An active owner of the same branch, ambiguous ownership, unavailable metadata, or a reused path without clear ownership preserves the device. Booted archived devices are stopped individually and deleted only after rechecking ownership, identity and external use. The selected iOS app and its exact console may end with that device; other devices and unknown users remain protected. Android requires a validated AVD path and launch receipt, confirmed emulator shutdown and released device files. No global Simulator quit is used.
+
+The following retention policies remain available through explicit `cleanup` scopes:
 
 - An owned branch Simulator is eligible when its recorded worktree disappears, or, while shut down, its latest CoreSimulator/Orchard usage timestamp is **more than one day old**. A booted device counts as currently used; an old boot timestamp alone never qualifies it. Filesystem modification times never establish Simulator use. Unknown timestamps do not satisfy the age rule. Discovery does not reset the retention clock.
 - A branch Simulator can also be reclaimed when every live owner is a clean non-default branch whose HEAD is an ancestor of the locally cached `origin/HEAD` target. The normalized branch name must still match the Simulator, protecting worktrees reused for a different branch. This is local ancestry evidence, not a fresh GitHub PR check: no fetch/prune, network requests or Git writes occur; squash merges may remain unrecognized.
@@ -63,16 +67,16 @@ Orchard checks for unused artifacts when the app starts, when preparing a branch
 
 Inspect with `orchard cleanup --json`; this does not stop Simulators or delete artifacts. Reports include exact device IDs, names, observed state, `requiresShutdown`, usage timestamps, candidate sizes and removal/preservation reasons. Shutdown is per-device, followed by another state/use/ownership check; an unconfirmed shutdown is not retried and never proceeds to deletion. New use after shutdown leaves the device stopped but preserved, reported as `stopped-preserved`. Size estimates can double-count APFS shared blocks; measure actual free space separately. Inspection may update ownership/report metadata and lock files. Use `orchard cleanup --apply` for an explicit collection; Simulator deletion permanently removes installed apps and in-device data.
 
-Limit inspection and application with `--scope simulators`, `--scope derived-data`, or `--scope source-packages` (default: `all`). `--no-discover` uses existing ownership records. For example:
+Limit inspection and application with `--scope archived-devices`, `--scope simulators`, `--scope derived-data`, or `--scope source-packages` (default: `all`). `--no-discover` uses existing ownership records. For example:
 
 ```sh
-orchard cleanup --scope simulators --no-discover
-orchard cleanup --scope simulators --no-discover --apply
+orchard cleanup --scope archived-devices --no-discover
+orchard cleanup --scope archived-devices --no-discover --apply
 ```
 
 Managed SourcePackages entries need a matching owner receipt and a known project record. Only a missing worktree with clean, pinned dependencies and no busy build/cache lease is eligible. Extra files/checkouts, local commits, ignored/untracked files, local/edited dependencies, unknown ownership or inspection errors preserve the entry. Existing caches acquire a receipt the next time this version of Orchard uses them. Templates and live-worktree caches are retained.
 
-Go, Gradle, npm, DeviceSupport and Simulator runtimes are outside this collector's scope. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
+Go, Gradle, npm, DeviceSupport and Simulator runtimes are outside this collector's scope. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. `invocation-error.json` records a failed or timed-out automatic request; a successful later pass clears it. Set `ORCHARD_DISABLE_BACKGROUND_CLEANUP=1` in isolated test environments to prevent automatic workers. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
 
 ## Requirements
 

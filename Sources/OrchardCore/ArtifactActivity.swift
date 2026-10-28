@@ -87,10 +87,14 @@ final class ArtifactLease: @unchecked Sendable {
         return ArtifactLease(fd)
     }
 
-    static func acquire(_ path: URL, shared: Bool = true) async throws -> ArtifactLease {
+    static func acquire(_ path: URL, shared: Bool = true, timeout: Duration? = nil) async throws -> ArtifactLease {
+        let deadline = timeout.map { ContinuousClock.now.advanced(by: $0) }
         while true {
             try Task.checkCancellation()
             if let lease = try tryAcquire(path, shared: shared) { return lease }
+            if let deadline, ContinuousClock.now >= deadline {
+                throw OrchardError.message("Timed out waiting for artifact lock: \(path.lastPathComponent)")
+            }
             try await Task.sleep(for: .milliseconds(50))
         }
     }
@@ -166,7 +170,9 @@ public enum BackgroundCleanup {
     }
 
     public static func launch() async {
+        guard ProcessInfo.processInfo.environment["ORCHARD_DISABLE_BACKGROUND_CLEANUP"] != "1" else { return }
         guard let executable = Bundle.main.executableURL, executable.lastPathComponent == "orchard" else { return }
+        do { try await CleanupInvocation().enqueue() } catch { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
         DispatchQueue.global(qos: .background).async {
             defer { continuation.resume() }

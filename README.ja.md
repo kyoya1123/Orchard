@@ -48,7 +48,11 @@ Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使い�
 
 ## バックグラウンドでの整理
 
-Orchardの起動時、ブランチ用Simulatorの準備時、依存解決・ビルドの前後に不要な成果物を確認します。整理はCPU・ディスクI/Oの優先度を下げた別プロセスで動かし、UIスレッドでは待機しません。同時に複数回呼ばれても、プロセス間ロックで整理を1つにまとめます。
+Orchardの起動・再オープン時、GUIからの実行時、CLIの`run`・`list`・`runs`・`simulator`を呼ぶたびに、アーカイブ済みworktreeの端末を確認します。ヘルプとcleanupのプレビューでは削除を予約しません。既存の所有記録を使い、CPU・ディスクI/Oの優先度を下げた別プロセスで動かします。同時要求をまとめ、整理中に届いた要求は次の検査で処理します。ロック待機・競合時の再試行には期限があり、失敗した要求は次回の呼び出しまで保留します。
+
+自動検査の対象は`archived-devices`（iOS・Android）だけです。Claude/Codexのライフサイクル情報で、対応する全所有元がアーカイブ済みと確認できた端末を対象にします。同じブランチに未アーカイブの所有元がある場合、所有元が曖昧な場合、情報を読めない場合は保持します。起動中の対象端末だけを停止し、所有元・識別子・利用状況を再検査して削除します。対象iOS端末内のアプリとその端末専用のコンソールは終了できますが、他端末や未知の利用者は保護します。AndroidはAVDの配置と起動記録を検証し、停止とファイル解放を確認します。Simulator全体を終了する操作は行いません。
+
+以下の保持期間による整理は、明示的な`cleanup`の各scopeで利用できます。
 
 - ブランチ用Simulatorは、記録されたworktreeが消失した場合、または停止中で最終利用から**1日を超えた**場合に候補になります。起動中は現在も利用中と扱い、起動日時が古いだけでは対象にしません。CoreSimulatorのlastUsedAt・lastBootedAtとOrchardの利用記録のうち新しい日時を使い、ファイルのmtimeでは判定しません。日時不明なら年齢条件では削除しません。
 - 全ての現存所有元が、ローカルに保存されたorigin/HEADの履歴へ取り込み済みのcleanな非デフォルトブランチである場合も候補です。正規化したブランチ名とSimulator名の一致を確認し、別ブランチに再利用されたworktreeを誤判定しません。GitHubの最新PR状態は問い合わせず、fetch・prune・Gitの変更も行いません。squash mergeは検出できない場合があります。
@@ -59,16 +63,16 @@ Orchardの起動時、ブランチ用Simulatorの準備時、依存解決・ビ�
 
 `orchard cleanup --json`で候補を確認します。名前・UDID・観測した状態・停止の必要性（`requiresShutdown`）・最終利用日時・容量の目安・削除または保持する理由を表示し、停止や削除はしません。実行時は対象端末だけを停止し、その後も状態・利用・所有元を再検査します。停止を確認できなければ再試行せず削除を見送り、停止後に利用が始まった場合は`stopped-preserved`として端末を残します。ただし所有記録、レポート、ロックファイルは更新する場合があります。容量表示にはAPFS共有ブロックが重複して含まれ得るため、実回収量は別途空き容量で確認してください。
 
-対象は`--scope simulators`、`--scope derived-data`、`--scope source-packages`で限定できます（既定all）。`--no-discover`は既存の所有記録だけを使用します。
+対象は`--scope archived-devices`、`--scope simulators`、`--scope derived-data`、`--scope source-packages`で限定できます（既定all）。`--no-discover`は既存の所有記録だけを使用します。
 
 ```sh
-orchard cleanup --scope simulators --no-discover
-orchard cleanup --scope simulators --no-discover --apply
+orchard cleanup --scope archived-devices --no-discover
+orchard cleanup --scope archived-devices --no-discover --apply
 ```
 
 `--apply`は実際に削除します。Simulator内のアプリや保存データも失われます。Go・Gradle・npm、DeviceSupport、Simulatorランタイムはこの整理処理の対象外です。
 
-所有記録と結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は同ディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。
+所有記録と結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は同ディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。自動検査の失敗や期限超過は`invocation-error.json`に記録し、後の検査が成功したら消去します。隔離テストでは`ORCHARD_DISABLE_BACKGROUND_CLEANUP=1`で自動workerを無効にできます。
 
 これは保持期間の制御で、容量の上限ではありません。削除した成果物は次回利用時に再ビルドします。cronやLaunchAgentの登録は不要です。Orchardを使わない間は整理せず、次の利用時に実行します。
 

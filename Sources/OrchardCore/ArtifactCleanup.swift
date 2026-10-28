@@ -18,12 +18,15 @@ public struct CleanupReport: Codable, Sendable {
 }
 
 public struct ArtifactCleanup: Sendable {
-    public enum Scope: String, Sendable { case all, simulators, derivedData = "derived-data", sourcePackages = "source-packages" }
+    public enum Scope: String, Sendable { case all, simulators, archivedDevices = "archived-devices", derivedData = "derived-data", sourcePackages = "source-packages" }
     typealias Command = @Sendable (String, [String]) async throws -> String
     let store: ArtifactStore
     let derivedData: URL
     let devices: URL
     let sourcePackages: URL?
+    let includeArchives: Bool
+    let archiveHome: URL
+    let archiveEnvironment: [String: String]
     let command: Command
     let now: @Sendable () -> Date
     static let retention: TimeInterval = 7 * 86400
@@ -33,10 +36,12 @@ public struct ArtifactCleanup: Sendable {
         self.init(store: ArtifactStore(),
                   derivedData: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData"),
                   devices: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
-                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"))
+                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"), includeArchives: true)
     }
 
-    init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil,
+    init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil, includeArchives: Bool = false,
+         archiveHome: URL = FileManager.default.homeDirectoryForCurrentUser,
+         archiveEnvironment: [String: String] = ProcessInfo.processInfo.environment,
          now: @escaping @Sendable () -> Date = { Date() },
          command: @escaping Command = { executable, arguments in
              // CoreSimulator IPC can stall even for `list` at background QoS.
@@ -49,6 +54,9 @@ public struct ArtifactCleanup: Sendable {
         self.derivedData = derivedData
         self.devices = devices
         self.sourcePackages = sourcePackages
+        self.includeArchives = includeArchives
+        self.archiveHome = archiveHome
+        self.archiveEnvironment = archiveEnvironment
         self.now = now
         self.command = command
     }
@@ -79,6 +87,12 @@ public struct ArtifactCleanup: Sendable {
             if scope == .all || scope == .derivedData {
                 if apply { try drainTrash(report: &report) }
                 try await cleanDerivedData(owners: owners, settings: settings, apply: apply, report: &report)
+            }
+            if scope == .archivedDevices || (scope == .all && includeArchives) {
+                let archived = await ArchivedDeviceCleanup(store: store, devices: devices, home: archiveHome,
+                    environment: archiveEnvironment, command: command).run(apply: apply, excludedPaths: settings.excludedPaths)
+                report.actions += archived.actions
+                if let error = archived.error { report.error = error }
             }
             if scope == .all || scope == .simulators {
                 try await cleanSimulators(settings: settings, apply: apply, report: &report)
@@ -289,7 +303,7 @@ public struct ArtifactCleanup: Sendable {
         try await command("/usr/bin/xcrun", ["simctl", "--set", devices.path] + arguments)
     }
 
-    private func deviceList() async throws -> [Device] {
+    func deviceList() async throws -> [Device] {
         let output = try await simctl(["list", "devices", "-j"])
         return Array(try JSONDecoder().decode(DeviceList.self, from: Data(output.utf8)).devices.values.joined())
     }
@@ -350,6 +364,7 @@ public struct ArtifactCleanup: Sendable {
         let processes: [Int: String]
         let files: [OpenFile]
         let simulatorSessions: [String]
+        var consoleTargets: [Int: String] = [:]
         func contains(_ paths: [String]) -> Bool {
             buildRunning || files.contains { file in paths.contains { ArtifactCleanup.contains(file.path, in: $0) } }
         }
@@ -389,7 +404,7 @@ public struct ArtifactCleanup: Sendable {
         ].contains(path)
     }
 
-    private func externalUsage() async throws -> ExternalUsage {
+    func externalUsage(globalBuildGuard: Bool = true) async throws -> ExternalUsage {
         let listing = try await command("/bin/ps", ["-axo", "pid=,comm="])
         var processes: [Int: String] = [:]
         for line in listing.split(separator: "\n") {
@@ -401,15 +416,20 @@ public struct ArtifactCleanup: Sendable {
             ["xcodebuild", "XCBBuildService", "XCBuildService", "SWBBuildService"]
                 .contains(URL(fileURLWithPath: $0).lastPathComponent)
         }
-        if buildRunning { return ExternalUsage(buildRunning: true, processes: processes, files: [], simulatorSessions: []) }
+        if buildRunning && globalBuildGuard { return ExternalUsage(buildRunning: true, processes: processes, files: [], simulatorSessions: []) }
+        var consoleTargets: [Int: String] = [:]
         var sessions: [String] = processes.values.contains {
             ["lldb", "debugserver", "lldb-rpc-server"].contains(URL(fileURLWithPath: $0).lastPathComponent)
         } ? [""] : []
         let simctlPIDs = processes.filter { URL(fileURLWithPath: $0.value).lastPathComponent == "simctl" }.keys.sorted()
         if !simctlPIDs.isEmpty {
-            let arguments = try await command("/bin/ps", ["-ww", "-p", simctlPIDs.map(String.init).joined(separator: ","), "-o", "args="])
+            let arguments = try await command("/bin/ps", ["-ww", "-p", simctlPIDs.map(String.init).joined(separator: ","), "-o", "pid=,args="])
             for line in arguments.split(separator: "\n") {
                 let ids = line.split(whereSeparator: { $0.isWhitespace }).filter { UUID(uuidString: String($0)) != nil }
+                let parts = line.split(whereSeparator: { $0.isWhitespace })
+                if ids.count == 1, parts.contains("launch"), parts.contains("--console"), let first = parts.first, let pid = Int(first) {
+                    consoleTargets[pid] = String(ids[0]).lowercased()
+                }
                 // Commands addressing "booted" or whose target is unknown are
                 // conservatively busy; never interrupt a console/log session.
                 sessions.append(contentsOf: ids.isEmpty ? [""] : ids.map { $0.lowercased() })
@@ -423,7 +443,7 @@ public struct ArtifactCleanup: Sendable {
             if line.hasPrefix("p") { pid = Int(line.dropFirst()) }
             else if line.hasPrefix("n") { files.append(.init(pid: pid, path: String(line.dropFirst()))) }
         }
-        return ExternalUsage(buildRunning: false, processes: processes, files: files, simulatorSessions: sessions)
+        return ExternalUsage(buildRunning: false, processes: processes, files: files, simulatorSessions: sessions, consoleTargets: consoleTargets)
     }
 
     private func cleanSimulators(settings: Settings, apply: Bool, report: inout CleanupReport) async throws {

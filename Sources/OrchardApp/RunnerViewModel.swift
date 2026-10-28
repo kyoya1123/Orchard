@@ -867,6 +867,7 @@ final class RunnerViewModel: ObservableObject {
     }
 
     private func startRun(_ request: RunRequest) {
+        BackgroundCleanup.schedule()
         let jobID = request.replacingJobID ?? UUID()
 
         let service = BuildRunService()

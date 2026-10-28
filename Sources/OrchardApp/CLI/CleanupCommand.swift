@@ -8,7 +8,7 @@ struct CleanupCommand: AsyncParsableCommand {
         abstract: "Inspect unused worktree Simulators and DerivedData. Pass --apply to remove them.")
     @Flag(name: .long, help: "Apply the inspected cleanup policy. Simulator deletion permanently removes its apps and data.")
     var apply = false
-    @Option(name: .long, help: "all, simulators, derived-data, or source-packages. Defaults to all.")
+    @Option(name: .long, help: "all, archived-devices (iOS and Android), simulators, derived-data, or source-packages. Defaults to all.")
     var scope = "all"
     @Flag(name: .long, help: "Use existing ownership records without discovering additional projects.")
     var noDiscover = false
@@ -41,7 +41,7 @@ struct CleanupWorker: AsyncParsableCommand {
         _ = setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_THROTTLE)
         let paths = CLIEnvironment(extraDirectoryPaths: [], json: false).directoryURLs
         _ = await Task.detached(priority: .background) {
-            await ArtifactCleanup().run(apply: true, directories: paths)
+            await CleanupInvocation().drain(directories: paths)
         }.value
     }
 }

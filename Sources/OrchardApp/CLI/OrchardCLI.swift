@@ -41,6 +41,11 @@ func destinationKindFilter(device: Bool, simulator: Bool) -> XcodeDestination.Ki
 func runOrchardCLI(_ arguments: [String]) async {
     do {
         let parsed = try OrchardCLI.parseAsRoot(arguments)
+        // Help, preview, and the worker must never recursively schedule apply.
+        if ["run", "list", "runs", "simulator"].contains(arguments.first ?? ""),
+           !arguments.contains("--help"), !arguments.contains("-h") {
+            await BackgroundCleanup.launch()
+        }
         switch parsed {
         case var command as RunCommand:
             try await command.run()

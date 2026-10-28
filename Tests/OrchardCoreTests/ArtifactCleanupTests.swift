@@ -60,6 +60,23 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         return path
     }
 
+    func testArchivedScopeDoesNotCollectUnrelatedDerivedDataOrPackages() async throws {
+        let f = try fixture(existing: false)
+        let dd = try cache(f)
+        let packages = f.root.appendingPathComponent("packages")
+        let marker = packages.appendingPathComponent("repo/worktrees/unknown/owner.json")
+        try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("invalid ownership; must not be inspected in archive-only scope".utf8).write(to: marker)
+        let worker = ArtifactCleanup(store: f.store, derivedData: f.worker.derivedData, devices: f.worker.devices,
+            sourcePackages: packages, archiveHome: f.root, archiveEnvironment: [:],
+            command: { _, _ in XCTFail("No device records should require commands"); return "" })
+        let report = await worker.run(apply: true, discover: false, scope: .archivedDevices)
+        XCTAssertNil(report.error)
+        XCTAssertTrue(report.actions.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     func testBootedOrphanIsPreviewedThenStoppedAndDeleted() async throws {
         let f = try fixture(existing: false)
         let id = try await simulator(f, state: "Booted")
@@ -467,7 +484,7 @@ actor CleanupCommands {
 
     func run(_ tool: String, _ args: [String]) throws -> String {
         if tool == "/bin/ps" {
-            if args.contains("args=") { return sessionArguments }
+            if args.contains("args=") || args.contains("pid=,args=") { return sessionArguments }
             return externalBuild ? "123 /usr/bin/xcodebuild\n" : processListing
         }
         if tool == "/usr/sbin/lsof" {

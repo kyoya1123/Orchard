@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct PreparedSimulator: Encodable, Sendable {
     public let udid: String
@@ -260,7 +261,8 @@ enum SimulatorProcess {
     }
 
     static func execute(executable: String, arguments: [String], timeout: TimeInterval,
-                        background: Bool = false, processQualityOfService: QualityOfService? = nil) async throws -> String {
+                        background: Bool = false, processQualityOfService: QualityOfService? = nil,
+                        terminationGrace: Duration = .seconds(2)) async throws -> String {
         let control = SimulatorProcessControl()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -282,15 +284,16 @@ enum SimulatorProcess {
                         process.qualityOfService = processQualityOfService ?? (background ? .background : .userInitiated)
                         process.standardOutput = out
                         process.standardError = err
+                        process.standardInput = FileHandle.nullDevice
                         try control.start(process)
-                        let timer = DispatchSource.makeTimerSource(queue: .global())
-                        timer.schedule(deadline: .now() + timeout)
-                        timer.setEventHandler { control.stop(timedOut: true) }
-                        timer.resume()
-                        defer { timer.cancel() }
-                        // Foundation's Process must run and wait on the same
-                        // thread; awaiting between these calls can strand its runloop.
-                        process.waitUntilExit()
+                        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+                        // Keep Foundation's launch runloop serviced, but never
+                        // enter waitUntilExit: a child can ignore SIGTERM.
+                        while process.isRunning {
+                            if ContinuousClock.now >= deadline { control.stop(timedOut: true) }
+                            if control.forceStopAfterGrace(terminationGrace) { try control.check() }
+                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+                        }
                         try control.check()
                         let stdout = try String(contentsOf: output, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
                         let stderr = try String(contentsOf: errorOutput, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -312,6 +315,7 @@ private final class SimulatorProcessControl: @unchecked Sendable {
     private var process: Process?
     private var cancelled = false
     private var timedOut = false
+    private var stoppedAt: ContinuousClock.Instant?
 
     func start(_ value: Process) throws {
         lock.lock()
@@ -324,9 +328,21 @@ private final class SimulatorProcessControl: @unchecked Sendable {
     func stop(timedOut: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        self.timedOut = self.timedOut || timedOut
+        guard !cancelled else { return }
+        self.timedOut = timedOut
         cancelled = true
+        stoppedAt = .now
         if let process, process.isRunning { process.terminate() }
+    }
+
+    func forceStopAfterGrace(_ grace: Duration) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stoppedAt, ContinuousClock.now >= stoppedAt.advanced(by: grace) else { return false }
+        // Only the Process instance we spawned is signalled. Do not enumerate
+        // processes or wait indefinitely for kernel/process teardown.
+        if let process, process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
+        return true
     }
 
     func check() throws {
