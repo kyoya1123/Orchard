@@ -18,18 +18,21 @@ public struct SimulatorBaseService: Sendable {
     private let destinationSet: URL
     private let command: Command
     private let store: ArtifactStore
+    private let closeWindow: @Sendable (String, String, Bool) async throws -> Void
 
     public init() {
         self.init(root: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Orchard/SimulatorBases-v1"),
                   destinationSet: FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Developer/CoreSimulator/Devices"), store: ArtifactStore())
+            .appendingPathComponent("Library/Developer/CoreSimulator/Devices"), store: ArtifactStore(), closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, uniqueDevice: $2) })
     }
 
     init(root: URL, destinationSet: URL, store: ArtifactStore? = nil,
+         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
          command: @escaping Command = { tool, arguments, timeout in
              try await SimulatorProcess.run(tool: tool, arguments: arguments, timeout: timeout)
          }) {
+        self.closeWindow = closeWindow
         self.store = store ?? ArtifactStore(root: root.appendingPathComponent("ownership"))
         self.root = root
         self.destinationSet = destinationSet
@@ -184,6 +187,7 @@ public struct SimulatorBaseService: Sendable {
                     progress("Preserving base with user-installed apps: \(entry.udid).")
                     continue
                 }
+                try await closeWindow(entry.name, entry.configuration.runtime, true)
                 if device.state == "Booted" {
                     _ = try await simctl(["shutdown", entry.udid], privateSet: true)
                     guard try await baseDevices().devices[entry.configuration.runtime]?.contains(where: {
@@ -294,6 +298,9 @@ public struct SimulatorBaseService: Sendable {
                     registry.clones?.removeAll { $0.udid == clone.udid }; try save(registry); continue
                 }
                 guard device.name == clone.name, ["Booted", "Shutdown"].contains(device.state) else { continue }
+                let windowList = try JSONDecoder().decode(DeviceList.self, from: Data(try await simctl(["list", "devices", "-j"]).utf8))
+                let uniqueWindowDevice = (windowList.devices[clone.runtime] ?? []).filter { $0.name == clone.name }.count == 1
+                try await closeWindow(clone.name, clone.runtime, uniqueWindowDevice)
                 if device.state == "Booted" { _ = try await simctl(["shutdown", clone.udid]) }
                 guard let stopped = try await current(), stopped.name == clone.name, stopped.state == "Shutdown" else {
                     throw OrchardError.message("Old managed device shutdown unconfirmed")

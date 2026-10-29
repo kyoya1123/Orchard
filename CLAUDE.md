@@ -210,3 +210,5 @@ open Orchard.app
 
 - Simulator runtime migration requires an available runtime at least as new as the selected Simulator SDK. Missing runtimes are pending, never a fallback. Base/clone generation includes runtime build, Xcode build and simctl path; only after replacement initialization are old managed clones removed. GUI/CLI saved managed destinations must go through `prepareManagedDestination`. Do not download runtimes automatically.
 - Android external build/install/test work and external iOS tests use `device-use` to hold bounded device activity leases. No process-based inference is permitted.
+
+- Close only the uniquely matched standalone Device Hub compact window with public Accessibility APIs before simctl shutdown/delete, including runtime migration. AX messaging and total waits must remain bounded. No whole-app quit, broad window close, or private URL guesses. Unknown layouts, tabs, duplicate device names/runtime, missing permission or failed confirmation preserve the device. Android retains exact-serial `adb emu kill` and disconnect confirmation before AVD deletion.

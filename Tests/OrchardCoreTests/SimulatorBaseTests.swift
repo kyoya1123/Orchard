@@ -19,13 +19,13 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(try SimulatorBaseService.hasNoAppBundles(in: root))
     }
 
-    private func fixture() throws -> (SimulatorBaseService, SimulatorFixture, URL) {
+    private func fixture(closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in }) throws -> (SimulatorBaseService, SimulatorFixture, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("OrchardBaseTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let fake = SimulatorFixture()
         let service = SimulatorBaseService(root: root, destinationSet: root.appendingPathComponent("default"),
-            command: { tool, arguments, _ in try await fake.run(tool, arguments) })
+            closeWindow: closeWindow, command: { tool, arguments, _ in try await fake.run(tool, arguments) })
         return (service, fake, root)
     }
 
@@ -190,6 +190,17 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         let calls = await fake.calls
         XCTAssertEqual(calls.filter { $0.contains("create") }.count, 1)
         XCTAssertEqual(calls.filter { $0.contains("clone") }.count, 1)
+    }
+
+    func testFailedWindowClosePreservesOldCloneAndBaseDuringMigration() async throws {
+        let (service, fake, _) = try fixture(closeWindow: { _, _, _ in throw OrchardError.message("Window close failed") })
+        let first = try await service.prepare(name: "branch")
+        await fake.setState(first.udid, "Booted")
+        await fake.setXcode("Xcode updated")
+        _ = try await service.prepare(name: "new-branch")
+        let calls = await fake.calls
+        XCTAssertFalse(calls.contains { ($0.contains("shutdown") || $0.contains("delete")) && $0.contains(first.udid) })
+        XCTAssertFalse(calls.contains { $0.contains("delete") && $0.contains(first.baseUDID) })
     }
 
     func testMissingSDKRuntimeLeavesOldBaseAndBranchAndFailsWithoutFallback() async throws {

@@ -54,7 +54,9 @@ Orchardの起動・再オープン時、GUIからの実行時、CLIの`run`・`l
 
 Orchardのビルド中はロックで保護し、処理完了時に最終使用を更新します。外部iOSテストは`orchard device-use --simulator UDID -- xcodebuild ... test`、Androidは`orchard device-use --avd NAME -- ./gradlew ...`で実行すると、その端末を処理終了まで保護します。待機上限は既定2時間、最大24時間です。このラッパーを使わない外部処理はプロセス一覧から推測しません。
 
-対象が起動中なら、iOSはそのUDIDを`simctl`で停止・削除し、Androidは対応するADBシリアルだけを停止して`avdmanager`で削除します。削除直前にworktree・所有元・端末識別子を再確認します。停止を確認できなければ削除せず、他の端末・worktree・ブランチ・ソースは変更しません。端末を削除すると、その中のアプリと保存データも失われます。
+iOSの停止・削除前に、端末名とruntimeが一意に一致するDevice Hubの独立したcompactウィンドウだけを、macOS Accessibilityの閉じるボタンで閉じます。`simctl delete`だけではDevice Hubのウィンドウは閉じません。レポートが`permission-required`ならシステム設定でOrchardのアクセシビリティを許可してください。操作は短い期限付きです。タブ・fullウィンドウ・識別不明・権限不足・閉鎖未確認では端末を保持し、Device Hub全体は終了しません。runtime移行でも同じ順序です。
+
+ウィンドウ閉鎖後に対象が起動中なら、iOSはそのUDIDを`simctl`で停止・削除し、Androidは対応するADBシリアルだけを停止して`avdmanager`で削除します。削除直前にworktree・所有元・端末識別子を再確認します。停止を確認できなければ削除せず、他の端末・worktree・ブランチ・ソースは変更しません。端末を削除すると、その中のアプリと保存データも失われます。
 
 ```sh
 orchard cleanup --scope orphaned-devices --no-discover --json

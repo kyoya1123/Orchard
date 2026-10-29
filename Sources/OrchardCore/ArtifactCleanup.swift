@@ -28,6 +28,8 @@ public struct ArtifactCleanup: Sendable {
     let deviceEnvironment: [String: String]
     let command: Command
     let now: @Sendable () -> Date
+    let closeWindow: @Sendable (String, String, Bool) async throws -> Void
+    let windowAccess: (@Sendable () async -> CleanupReport.Action?)?
     let runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)?
     static let retention: TimeInterval = 7 * 86400
 
@@ -36,7 +38,9 @@ public struct ArtifactCleanup: Sendable {
                   derivedData: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData"),
                   devices: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
                   sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"),
-                  runtimeMaintenance: { await SimulatorBaseService().maintain() })
+                  runtimeMaintenance: { await SimulatorBaseService().maintain() },
+                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, uniqueDevice: $2) },
+                  windowAccess: { await DeviceWindowCloser.accessReport() })
     }
 
     init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil,
@@ -44,6 +48,8 @@ public struct ArtifactCleanup: Sendable {
          deviceEnvironment: [String: String] = ProcessInfo.processInfo.environment,
          now: @escaping @Sendable () -> Date = { Date() },
          runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)? = nil,
+         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
+         windowAccess: (@Sendable () async -> CleanupReport.Action?)? = nil,
          command: @escaping Command = { executable, arguments in
              // CoreSimulator IPC can stall even for `list` at background QoS.
              // Keep the collector at low priority; its external device-tool clients
@@ -53,6 +59,8 @@ public struct ArtifactCleanup: Sendable {
              return try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60,
                  background: !ipc, processQualityOfService: ipc ? .utility : nil)
          }) {
+        self.closeWindow = closeWindow
+        self.windowAccess = windowAccess
         self.runtimeMaintenance = runtimeMaintenance
         self.store = store
         self.derivedData = derivedData
@@ -72,6 +80,7 @@ public struct ArtifactCleanup: Sendable {
         let lastBootedAt: String?
         let lastUsedAt: String?
         let dataPathSize: Int64?
+        var runtimeIdentifier: String? = nil
     }
     struct DeviceList: Decodable { let devices: [String: [Device]] }
     struct Trash: Codable { let path: String }
@@ -92,9 +101,10 @@ public struct ArtifactCleanup: Sendable {
                 try await cleanDerivedData(owners: owners, settings: settings, apply: apply, report: &report)
             }
             if [.all, .simulators, .orphanedDevices, .archivedDevices].contains(scope) {
+                if apply, let windowAccess, let access = await windowAccess() { report.actions.append(access) }
                 if apply, let runtimeMaintenance, let action = await runtimeMaintenance() { report.actions.append(action) }
                 let devicesReport = await OrphanedDeviceCleanup(store: store, devices: devices, home: deviceHome,
-                    environment: deviceEnvironment, now: now, command: command).run(apply: apply,
+                    environment: deviceEnvironment, now: now, closeWindow: closeWindow, command: command).run(apply: apply,
                         excludedPaths: settings.excludedPaths, includeAndroid: scope != .simulators)
                 report.actions += devicesReport.actions
                 if let error = devicesReport.error { report.error = error }

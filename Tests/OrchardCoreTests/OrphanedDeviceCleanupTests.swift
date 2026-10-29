@@ -141,4 +141,24 @@ final class OrphanedDeviceCleanupTests: XCTestCase, @unchecked Sendable {
             isMissing: { path in if path == "/unreadable" { throw POSIXError(.EACCES) }; return false }) { _, _ in "" }
         XCTAssertThrowsError(try worker.eligibility([f.root.path, "/unreadable"], lastUsedAt: 1))
     }
+
+    func testWindowClosesBeforeShutdownAndFailurePreservesDevice() async throws {
+        for failClose in [false, true] {
+            let f = try await fixture()
+            let worker = OrphanedDeviceCleanup(store: f.store, devices: f.worker.devices, home: f.root, environment: [:],
+                closeWindow: { name, _, unique in
+                    XCTAssertEqual(name, "feature-example")
+                    XCTAssertTrue(unique)
+                    let verbs = await f.commands.verbs
+                    XCTAssertFalse(verbs.contains("shutdown"))
+                    XCTAssertFalse(verbs.contains("delete"))
+                    if failClose { throw OrchardError.message("Window permission unavailable") }
+                }) { try await f.commands.run($0, $1) }
+            let result = await worker.run(apply: true)
+            XCTAssertEqual(result.actions.first?.outcome, failClose ? "preserved" : "removed")
+            let verbs = await f.commands.verbs
+            XCTAssertEqual(verbs.contains("shutdown"), !failClose)
+            XCTAssertEqual(verbs.contains("delete"), !failClose)
+        }
+    }
 }

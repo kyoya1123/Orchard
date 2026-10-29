@@ -11,6 +11,7 @@ struct OrphanedDeviceCleanup: Sendable {
     let sdk: URL
     let java: String?
     let command: Command
+    let closeWindow: @Sendable (String, String, Bool) async throws -> Void
     let now: @Sendable () -> Date
     static let unusedRetention: Double = 24 * 3600
     let shutdownTimeout: Duration
@@ -21,7 +22,9 @@ struct OrphanedDeviceCleanup: Sendable {
          shutdownTimeout: Duration = .seconds(5), shutdownPollInterval: Duration = .milliseconds(250),
          now: @escaping @Sendable () -> Date = { Date() },
          isMissing: @escaping @Sendable (String) throws -> Bool = MissingWorktree.check,
+         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
          command: @escaping Command) {
+        self.closeWindow = closeWindow
         self.now = now
         self.store = store
         self.devices = devices
@@ -79,8 +82,11 @@ struct OrphanedDeviceCleanup: Sendable {
         try await command("/usr/bin/xcrun", ["simctl", "--set", devices.path] + args)
     }
     func inventory() async throws -> [ArtifactCleanup.Device] {
-        Array(try JSONDecoder().decode(ArtifactCleanup.DeviceList.self,
-            from: Data(try await simctl(["list", "devices", "-j"]).utf8)).devices.values.joined())
+        let list = try JSONDecoder().decode(ArtifactCleanup.DeviceList.self,
+            from: Data(try await simctl(["list", "devices", "-j"]).utf8))
+        return list.devices.flatMap { runtime, devices in
+            devices.map { device in var value = device; value.runtimeIdentifier = runtime; return value }
+        }
     }
     func ios(apply: Bool, exclusions: [String], report: inout CleanupReport) async throws {
         let records = try store.all(ArtifactSimulator.self, in: "simulators")
@@ -128,6 +134,15 @@ struct OrphanedDeviceCleanup: Sendable {
                 guard let fresh = try await inventory().first(where: { $0.udid == device.udid }),
                       fresh.name == record.name, fresh.state == device.state,
                       try unchanged() else { report.actions.append(action("device-or-worktree-changed", "preserved")); continue }
+                // Titles identify a compact window only when device name/runtime
+                // is unique. Never close a shared or ambiguous device window.
+                let windowInventory = try await inventory()
+                guard let runtime = fresh.runtimeIdentifier else {
+                    throw OrchardError.message("Ambiguous device-to-window association; device preserved")
+                }
+                let uniqueWindowDevice = windowInventory.filter { $0.name == record.name && $0.runtimeIdentifier == runtime }.count == 1
+                try await closeWindow(record.name, runtime, uniqueWindowDevice)
+                guard try unchanged() else { throw OrchardError.message("Ownership changed after window close") }
                 if fresh.state == "Booted" {
                     outcome = "shutdown-unconfirmed"
                     _ = try await simctl(["shutdown", fresh.udid])
