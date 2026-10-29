@@ -46,9 +46,10 @@ public struct ArtifactCleanup: Sendable {
          runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)? = nil,
          command: @escaping Command = { executable, arguments in
              // CoreSimulator IPC can stall even for `list` at background QoS.
-             // Keep the worker/queue at low priority; only its short simctl
-             // client uses utility QoS. Filesystem collection remains throttled.
-             let ipc = executable == "/usr/bin/xcrun" || executable.hasSuffix("/adb")
+             // Keep the collector at low priority; its external device-tool clients
+             // (including avdmanager via env) must finish at utility QoS.
+             // Background QoS can indefinitely throttle their file-backed IPC.
+             let ipc = executable == "/usr/bin/xcrun" || executable.hasSuffix("/adb") || executable == "/usr/bin/env"
              return try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60,
                  background: !ipc, processQualityOfService: ipc ? .utility : nil)
          }) {
