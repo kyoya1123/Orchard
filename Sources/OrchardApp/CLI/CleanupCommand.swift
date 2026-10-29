@@ -38,7 +38,9 @@ struct CleanupWorker: AsyncParsableCommand {
         signal(SIGHUP, SIG_IGN)
         _ = setsid()
         _ = setpriority(PRIO_PROCESS, 0, 20)
-        _ = setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_THROTTLE)
+        // Task QoS keeps our filesystem work in the background. A process-wide
+        // I/O throttle would also trap utility-QoS simctl/ADB/avdmanager children
+        // and make their bounded IPC/deletion commands time out.
         let paths = CLIEnvironment(extraDirectoryPaths: [], json: false).directoryURLs
         _ = await Task.detached(priority: .background) {
             await CleanupInvocation().drain(directories: paths)
