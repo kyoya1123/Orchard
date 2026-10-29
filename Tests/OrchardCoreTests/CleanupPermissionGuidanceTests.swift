@@ -55,7 +55,7 @@ final class CleanupPermissionGuidanceTests: XCTestCase {
         model.checkAgain()
         XCTAssertTrue(model.isTrusted)
         XCTAssertTrue(model.retriedCleanup)
-        XCTAssertTrue(model.showsBanner) // Success is visible until dismissed.
+        XCTAssertFalse(model.showsBanner) // A granted permission removes the requirement.
         XCTAssertEqual(environment.retries, 1)
         XCTAssertEqual(environment.prompts, 1)
         model.requestAccess()
@@ -91,6 +91,21 @@ final class CleanupPermissionGuidanceTests: XCTestCase {
         model.refresh(needsAccess: true)
         XCTAssertTrue(model.showsBanner)
         XCTAssertFalse(environment.dismissed)
+        XCTAssertEqual(environment.prompts, 0)
+        XCTAssertEqual(environment.settings, 0)
+    }
+
+    func testManualRecheckHidesRequirementDespiteStaleCleanupReport() {
+        let environment = Environment()
+        let model = environment.model()
+        model.refresh(needsAccess: true)
+        XCTAssertTrue(model.showsBanner)
+        environment.trusted = true
+        model.checkAgain()
+        for _ in 0..<5 { model.refresh(needsAccess: true) }
+        XCTAssertTrue(model.isTrusted)
+        XCTAssertFalse(model.showsBanner)
+        XCTAssertEqual(environment.retries, 1)
         XCTAssertEqual(environment.prompts, 0)
         XCTAssertEqual(environment.settings, 0)
     }

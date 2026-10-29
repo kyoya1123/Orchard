@@ -58,7 +58,7 @@ A positively associated device qualifies when **every owner worktree is missing,
 
 Orchard's builds hold device/project leases through installation and refresh usage on completion. Wrap external foreground iOS tests or Android build/install/test commands with `orchard device-use --simulator UDID -- xcodebuild ... test` or `orchard device-use --avd NAME -- ./gradlew ...`; the exact target remains protected until the command finishes. The wrapper has a bounded timeout (default 2 hours, maximum 24 hours). External work that does not use this wrapper cannot be inferred from process lists.
 
-Before stopping/deleting an eligible iOS Simulator, Orchard closes its uniquely identified standalone Device Hub compact window using the public macOS Accessibility close button. Device Hub keeps a separate window even after `simctl delete`, so shutdown alone is insufficient. The Orchard menu explains missing permission; its 許可を設定 button explicitly requests macOS guidance and opens Accessibility settings. Enable Orchard there and return to recheck permission and retry eligible cleanup. Dismissed guidance remains available in Settings (gear icon). Launches, cleanup and CLI invocations never request a permission dialog automatically. Window calls have short deadlines. Ambiguous titles, tabs/full windows, unsupported window layouts, unavailable permission, or an unconfirmed close preserve the device; Orchard never quits Device Hub or closes all windows. This also applies to runtime migration.
+Before stopping/deleting an eligible iOS Simulator, Orchard closes its uniquely identified standalone Device Hub compact window using the public macOS Accessibility close button. Device Hub keeps a separate window even after `simctl delete`, so shutdown alone is insufficient. The Orchard menu explains missing permission; its 許可を設定 button explicitly requests macOS guidance and opens Accessibility settings. Enable Orchard there and return to recheck permission and retry eligible cleanup. Granted access hides the menu guidance; Settings shows a compact granted status. Dismissed guidance remains available in Settings (gear icon). Launches, cleanup and CLI invocations never request a permission dialog automatically. Window calls have short deadlines. Ambiguous titles, tabs/full windows, unsupported window layouts, unavailable permission, or an unconfirmed close preserve the device; Orchard never quits Device Hub or closes all windows. This also applies to runtime migration.
 
 After window closure, eligible booted iOS Simulators are individually shut down and deleted with `simctl`; Android emulators are stopped with their exact ADB serial and removed with `avdmanager`. The worktree path, ownership and device identity are checked again before removal. Failed or unconfirmed shutdown never proceeds to deletion. Other devices, worktrees, branches and source files remain untouched. Deleting a device removes the apps and data stored inside it.
 
@@ -91,6 +91,7 @@ Build from source:
 ```bash
 git clone https://github.com/kyoya1123/Orchard.git
 cd Orchard
+export ORCHARD_SIGNING_IDENTITY="Apple Development: Your Name (Certificate ID)"
 Scripts/package-app.sh
 open Orchard.app
 ```
@@ -151,10 +152,12 @@ The shared registry lives under `~/Library/Application Support/Orchard/Repositor
 
 ```bash
 swift test              # run tests
-Scripts/package-app.sh  # build and package Orchard.app
+ORCHARD_SIGNING_IDENTITY="Apple Development: Your Name (Certificate ID)" Scripts/package-app.sh  # build and package Orchard.app
 ```
 
 The package has two targets:
 
 - `OrchardCore` — discovery (git worktrees, Xcode projects), `xcodebuild` / `simctl` / `devicectl` orchestration, selection resolving, and the shared run store.
 - `OrchardApp` — the `MenuBarExtra` GUI and the CLI entry points.
+
+Packaging requires a stable Apple Development or Developer ID Application certificate in `ORCHARD_SIGNING_IDENTITY`. The complete bundle is signed and verified after assembling it. Ad-hoc signatures change identity on rebuild and do not preserve macOS privacy grants reliably. Replacing an older unsigned/ad-hoc build may require approving the newly signed app once; Orchard never changes or resets those settings. GUI-only permission diagnostics are saved to `~/Library/Application Support/Orchard/Diagnostics-v1/gui-accessibility.json`.

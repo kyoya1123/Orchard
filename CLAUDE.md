@@ -163,6 +163,7 @@ swift test
 Build app bundle:
 
 ```bash
+export ORCHARD_SIGNING_IDENTITY="Apple Development: Your Name (Certificate ID)"
 Scripts/package-app.sh
 ```
 
@@ -214,3 +215,5 @@ open Orchard.app
 - Close only the uniquely matched standalone Device Hub compact window with public Accessibility APIs before simctl shutdown/delete, including runtime migration. AX messaging and total waits must remain bounded. No whole-app quit, broad window close, or private URL guesses. Unknown layouts, tabs, duplicate device names/runtime, missing permission or failed confirmation preserve the device. Android retains exact-serial `adb emu kill` and disconnect confirmation before AVD deletion.
 
 - `CleanupPermissionMonitor` is GUI-only. The menu and Settings share `CleanupPermissionGuidance`; activation/report changes only check permission. Only the explicit permission button calls `AXIsProcessTrustedWithOptions` with prompting enabled, at most once per GUI session unless permission is later revoked. Returning with newly granted permission schedules one cleanup retry. Dismissal persists, Settings stays available, and the user alone grants the OS permission.
+
+- Package the complete app with a stable signing certificate, using `ORCHARD_SIGNING_IDENTITY`; `sign-app.sh` seals Info.plist/resources and verifies the signature. Never install the linker-ad-hoc executable inside an unsigned app, weaken its designated requirement, or reset TCC. GUI permission diagnostics live in `Diagnostics-v1/gui-accessibility.json` (outside the cleanup watcher), recording only the GUI PID/path/commit and live permission/banner state. Granted permission hides the menu requirement; Settings retains one compact status row.

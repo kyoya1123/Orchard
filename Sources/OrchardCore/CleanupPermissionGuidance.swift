@@ -20,6 +20,7 @@ public final class CleanupPermissionGuidance {
     @ObservationIgnored private let openSettings: () -> Bool
     @ObservationIgnored private let retryCleanup: () -> Void
     @ObservationIgnored private let saveDismissal: (Bool) -> Void
+    @ObservationIgnored private let didCheck: (Bool, Bool) -> Void
 
     public convenience init(dismissed: Bool = false, saveDismissal: @escaping (Bool) -> Void = { _ in }) {
         self.init(dismissed: dismissed, check: { AXIsProcessTrusted() }, prompt: {
@@ -27,19 +28,22 @@ public final class CleanupPermissionGuidance {
             _ = AXIsProcessTrustedWithOptions(options)
         }, openSettings: {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-        }, retryCleanup: { BackgroundCleanup.schedule() }, saveDismissal: saveDismissal)
+        }, retryCleanup: { BackgroundCleanup.schedule() }, saveDismissal: saveDismissal,
+           didCheck: { GUIAccessibilityStatus.record(trusted: $0, showsRequirement: $1) })
     }
 
     init(dismissed: Bool = false, check: @escaping () -> Bool, prompt: @escaping () -> Void,
          openSettings: @escaping () -> Bool, retryCleanup: @escaping () -> Void,
-         saveDismissal: @escaping (Bool) -> Void = { _ in }) {
+         saveDismissal: @escaping (Bool) -> Void = { _ in },
+         didCheck: @escaping (Bool, Bool) -> Void = { _, _ in }) {
         self.isDismissed = dismissed
         self.check = check; self.prompt = prompt; self.openSettings = openSettings
         self.retryCleanup = retryCleanup; self.saveDismissal = saveDismissal
+        self.didCheck = didCheck
     }
 
     public var showsBanner: Bool {
-        hasChecked && !isDismissed && (isTrusted ? retriedCleanup : needsAccess)
+        hasChecked && !isTrusted && needsAccess && !isDismissed
     }
 
     /// Called on activation, menu opening and cleanup-report changes. No prompt.
@@ -61,6 +65,7 @@ public final class CleanupPermissionGuidance {
             setDismissed(false)
             retryCleanup()
         }
+        didCheck(isTrusted, showsBanner)
     }
 
     public func checkAgain() { refresh(needsAccess: needsAccess) }
@@ -78,7 +83,10 @@ public final class CleanupPermissionGuidance {
         if !isTrusted { settingsOpenFailed = !openSettings() }
     }
 
-    public func dismiss() { setDismissed(true) }
+    public func dismiss() {
+        setDismissed(true)
+        didCheck(isTrusted, showsBanner)
+    }
     private func setDismissed(_ value: Bool) { isDismissed = value; saveDismissal(value) }
 
     public nonisolated static var reportDirectory: URL { ArtifactStore().root }
