@@ -21,6 +21,7 @@ struct RunnerMenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !model.didCompleteOnboarding {
+                CleanupPermissionView(guidance: model.cleanupPermission.guidance)
                 onboardingView
             } else if isSettingsPresented {
                 settingsHeader
@@ -33,6 +34,7 @@ struct RunnerMenuView: View {
             } else {
                 header
                 Divider()
+                CleanupPermissionView(guidance: model.cleanupPermission.guidance)
                 if !model.hasProjectSources {
                     emptyDirectoriesView
                 } else {
@@ -49,6 +51,7 @@ struct RunnerMenuView: View {
             await model.refresh()
         }
         .onAppear {
+            model.cleanupPermission.refresh()
             // Only mirror CLI runs while the menu is open; no idle polling.
             model.startCLISync()
         }
@@ -527,104 +530,108 @@ struct RunnerMenuView: View {
     // MARK: - Settings
 
     private var settingsView: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RegisteredRepositoriesView(repositories: model.registeredRepositories)
-            Divider()
-            HStack {
-                Text("Additional Directories")
-                    .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                CleanupPermissionView(guidance: model.cleanupPermission.guidance, alwaysVisible: true)
+                Divider()
+                RegisteredRepositoriesView(repositories: model.registeredRepositories)
+                Divider()
+                HStack {
+                    Text("Additional Directories")
+                        .font(.headline)
 
-                Spacer()
+                    Spacer()
 
-                Button {
-                    selectDirectory()
-                } label: {
-                    Label("Add", systemImage: "folder.badge.plus")
+                    Button {
+                        selectDirectory()
+                    } label: {
+                        Label("Add", systemImage: "folder.badge.plus")
+                    }
                 }
-            }
 
-            if model.configuredDirectoryPaths.isEmpty {
-                Text("No additional directories. CLI projects are added automatically.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(model.configuredDirectoryPaths, id: \.self) { path in
-                            HStack(spacing: 8) {
-                                Image(systemName: "folder")
-                                    .foregroundStyle(.secondary)
+                if model.configuredDirectoryPaths.isEmpty {
+                    Text("No additional directories. CLI projects are added automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(model.configuredDirectoryPaths, id: \.self) { path in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder")
+                                        .foregroundStyle(.secondary)
 
-                                Text(path)
-                                    .font(.caption)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                    Text(path)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
 
-                                Spacer(minLength: 8)
+                                    Spacer(minLength: 8)
 
-                                Button {
-                                    model.removeConfiguredDirectory(path)
-                                    Task { await model.refresh() }
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .foregroundStyle(.red)
+                                    Button {
+                                        model.removeConfiguredDirectory(path)
+                                        Task { await model.refresh() }
+                                    } label: {
+                                        Image(systemName: "trash")
+                                            .foregroundStyle(.red)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("Remove this directory")
                                 }
-                                .buttonStyle(.borderless)
-                                .help("Remove this directory")
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
 
-                            if path != model.configuredDirectoryPaths.last {
-                                Divider()
-                                    .padding(.leading, 10)
+                                if path != model.configuredDirectoryPaths.last {
+                                    Divider()
+                                        .padding(.leading, 10)
+                                }
                             }
                         }
                     }
-                }
-                .frame(maxHeight: 180)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
-            }
-
-            Divider()
-
-            Text("Global Shortcut")
-                .font(.headline)
-
-            HStack(spacing: 8) {
-                ShortcutRecorderField(hotKey: model.globalHotKey) { hotKey in
-                    model.setGlobalHotKey(hotKey)
+                    .frame(maxHeight: 180)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    )
                 }
 
-                if model.globalHotKey != nil {
-                    Button("Clear") {
-                        model.setGlobalHotKey(nil)
+                Divider()
+
+                Text("Global Shortcut")
+                    .font(.headline)
+
+                HStack(spacing: 8) {
+                    ShortcutRecorderField(hotKey: model.globalHotKey) { hotKey in
+                        model.setGlobalHotKey(hotKey)
+                    }
+
+                    if model.globalHotKey != nil {
+                        Button("Clear") {
+                            model.setGlobalHotKey(nil)
+                        }
                     }
                 }
+
+                Text("Opens the Orchard window from any app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Divider()
+
+                Button(role: .destructive) {
+                    NSApplication.shared.terminate(nil)
+                } label: {
+                    Label("Quit Orchard", systemImage: "power")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut("q", modifiers: .command)
+                .help("Quit Orchard (⌘Q)")
             }
-
-            Text("Opens the Orchard window from any app.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Button(role: .destructive) {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Label("Quit Orchard", systemImage: "power")
-                    .frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            .keyboardShortcut("q", modifiers: .command)
-            .help("Quit Orchard (⌘Q)")
         }
     }
 

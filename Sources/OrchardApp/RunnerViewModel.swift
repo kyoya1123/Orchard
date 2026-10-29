@@ -84,6 +84,7 @@ struct RunJobGroup: Identifiable {
 
 @MainActor
 final class RunnerViewModel: ObservableObject {
+    let cleanupPermission = CleanupPermissionMonitor()
     @Published var configuredDirectoryPaths: [String] = []
     @Published private(set) var registeredRepositories: [RegisteredRepository] = []
     @Published var worktrees: [WorktreeContext] = []

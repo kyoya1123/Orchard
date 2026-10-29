@@ -212,3 +212,5 @@ open Orchard.app
 - Android external build/install/test work and external iOS tests use `device-use` to hold bounded device activity leases. No process-based inference is permitted.
 
 - Close only the uniquely matched standalone Device Hub compact window with public Accessibility APIs before simctl shutdown/delete, including runtime migration. AX messaging and total waits must remain bounded. No whole-app quit, broad window close, or private URL guesses. Unknown layouts, tabs, duplicate device names/runtime, missing permission or failed confirmation preserve the device. Android retains exact-serial `adb emu kill` and disconnect confirmation before AVD deletion.
+
+- `CleanupPermissionMonitor` is GUI-only. The menu and Settings share `CleanupPermissionGuidance`; activation/report changes only check permission. Only the explicit permission button calls `AXIsProcessTrustedWithOptions` with prompting enabled, at most once per GUI session unless permission is later revoked. Returning with newly granted permission schedules one cleanup retry. Dismissal persists, Settings stays available, and the user alone grants the OS permission.
