@@ -207,10 +207,24 @@ struct OrphanedDeviceCleanup: Sendable {
         return result
     }
 
+    func connectedEmulatorSerials() async throws -> Set<String> {
+        let lines = try await adb(["devices"]).split(whereSeparator: \.isNewline)
+        guard lines.first?.hasPrefix("List of devices attached") == true else {
+            throw OrchardError.message("Unable to confirm emulator disconnect")
+        }
+        // During targeted shutdown ADB can temporarily report offline or lose
+        // its console identity. Wait for the already-verified serial to vanish;
+        // do not query a dying emulator's name or mistake offline for absence.
+        return Set(lines.dropFirst().compactMap { line in
+            let columns = line.split(whereSeparator: { $0.isWhitespace })
+            guard let serial = columns.first, serial.hasPrefix("emulator-") else { return nil }
+            return String(serial)
+        })
+    }
     func waitForShutdown(_ serial: String) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                while try await self.runningAVDs().keys.contains(serial) {
+                while try await self.connectedEmulatorSerials().contains(serial) {
                     try await Task.sleep(for: self.shutdownPollInterval)
                 }
             }

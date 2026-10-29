@@ -88,6 +88,14 @@ final class OrphanedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testTargetedShutdownWaitsThroughOfflineTransition() async throws {
+        let f = try fixture()
+        await f.commands.setMode("offline-after-kill")
+        let result = await f.worker.run(apply: true)
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.actions.first?.outcome, "removed")
+    }
+
     func testShutdownDeadlineIncludesSlowADBInspection() async throws {
         let f = try fixture()
         await f.commands.setMode("slow-after-kill")
@@ -148,12 +156,17 @@ actor AndroidCleanupCommands {
     var mutations: [String] = []
     var mode = ""
     var killed = false
+    var offlinePolls = 0
     init(avd: URL, ini: URL, worktree: URL) { self.avd = avd; self.ini = ini; self.worktree = worktree }
     func setMode(_ value: String) { mode = value }
 
     func run(_ tool: String, _ args: [String]) async throws -> String {
         if tool.hasSuffix("/platform-tools/adb") {
             if args == ["devices"] {
+                if killed && mode == "offline-after-kill" && offlinePolls < 2 {
+                    offlinePolls += 1
+                    return "List of devices attached\r\nemulator-5554\toffline\r\n"
+                }
                 if killed && mode == "slow-after-kill" { try await Task.sleep(for: .seconds(30)) }
                 return "List of devices attached\n" + running.keys.sorted().map { "\($0)\tdevice\n" }.joined()
             }
