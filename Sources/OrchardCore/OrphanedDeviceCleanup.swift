@@ -1,12 +1,12 @@
 import Foundation
 
-/// Explicit archive cleanup. This does not infer archive state from age, merges,
-/// missing folders, or a branch-shaped device name. Called under cleanup.lock.
-struct ArchivedDeviceCleanup: Sendable {
+/// Removes positively associated devices only when every owning worktree is missing.
+/// No session metadata, process inspection, age, or merge inference. Called under cleanup.lock.
+struct OrphanedDeviceCleanup: Sendable {
     typealias Command = ArtifactCleanup.Command
     let store: ArtifactStore
     let devices: URL
-    let archive: WorktreeArchiveState
+    let isMissing: @Sendable (String) throws -> Bool
     let androidHome: URL
     let sdk: URL
     let java: String?
@@ -17,10 +17,11 @@ struct ArchivedDeviceCleanup: Sendable {
     init(store: ArtifactStore, devices: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser,
          environment: [String: String] = ProcessInfo.processInfo.environment,
          shutdownTimeout: Duration = .seconds(5), shutdownPollInterval: Duration = .milliseconds(250),
+         isMissing: @escaping @Sendable (String) throws -> Bool = MissingWorktree.check,
          command: @escaping Command) {
         self.store = store
         self.devices = devices
-        self.archive = WorktreeArchiveState(home: home)
+        self.isMissing = isMissing
         let env = environment
         self.androidHome = URL(fileURLWithPath: env["ANDROID_AVD_HOME"] ?? home.appendingPathComponent(".android/avd").path)
         self.sdk = URL(fileURLWithPath: env["ANDROID_HOME"] ?? env["ANDROID_SDK_ROOT"] ?? home.appendingPathComponent("Library/Android/sdk").path)
@@ -31,27 +32,28 @@ struct ArchivedDeviceCleanup: Sendable {
         self.shutdownPollInterval = shutdownPollInterval
     }
 
-    func run(apply: Bool, excludedPaths: [String] = []) async -> CleanupReport {
+    func run(apply: Bool, excludedPaths: [String] = [], includeAndroid: Bool = true) async -> CleanupReport {
         var report = CleanupReport()
         do {
-            let sessions = try archive.sessions()
-            try await ios(sessions: sessions, apply: apply, exclusions: excludedPaths, report: &report)
+            try await ios(apply: apply, exclusions: excludedPaths, report: &report)
         } catch {
             report.error = String(describing: error)
-            report.actions.append(.init(target: devices.path, reason: "archive-inspection-failed: \(error)", outcome: "preserved"))
+            report.actions.append(.init(target: devices.path, reason: "worktree-inspection-failed: \(error)", outcome: "preserved"))
         }
+        guard includeAndroid else { return report }
         // An unavailable CoreSimulator must not prevent Android inspection.
         do {
-            try await android(sessions: archive.sessions(), apply: apply, exclusions: excludedPaths, report: &report)
+            try await android(apply: apply, exclusions: excludedPaths, report: &report)
         } catch {
             report.error = report.error ?? String(describing: error)
-            report.actions.append(.init(target: androidHome.path, reason: "archive-inspection-failed: \(error)", outcome: "preserved"))
+            report.actions.append(.init(target: androidHome.path, reason: "worktree-inspection-failed: \(error)", outcome: "preserved"))
         }
         return report
     }
 
-    func evidence(_ sessions: [WorktreeArchiveState.Session], paths: Set<String>, name: String, boundAt: Double) -> WorktreeArchiveState.Evidence? {
-        WorktreeArchiveState.evidence(sessions: sessions, paths: paths, name: name, boundAt: boundAt)
+    func allMissing(_ paths: Set<String>) throws -> Bool {
+        guard !paths.isEmpty else { return false }
+        return try paths.allSatisfy { try isMissing($0) }
     }
     func excluded(_ paths: Set<String>, _ exclusions: [String]) -> Bool {
         exclusions.contains { exclusion in
@@ -66,30 +68,7 @@ struct ArchivedDeviceCleanup: Sendable {
         Array(try JSONDecoder().decode(ArtifactCleanup.DeviceList.self,
             from: Data(try await simctl(["list", "devices", "-j"]).utf8)).devices.values.joined())
     }
-    var inspector: ArtifactCleanup {
-        ArtifactCleanup(store: store, derivedData: store.root.appendingPathComponent("unused"), devices: devices, command: command)
-    }
-
-    // Selected device apps and its exact simctl console are supposed to end.
-    // Unknown debuggers, sessions targeting "booted", and external owner/file
-    // users remain vetoes. No global Simulator/Device Hub quit is ever sent.
-    func busy(_ usage: ArtifactCleanup.ExternalUsage, device: ArtifactCleanup.Device, owners: Set<ArtifactOwner>) -> Bool {
-        if usage.buildRunning || usage.simulatorSessions.contains("") { return true }
-        let root = devices.appendingPathComponent(device.udid).path
-        return usage.files.contains { file in
-            let ownerFile = owners.contains { ArtifactCleanup.contains(file.path, in: $0.worktreePath) }
-            let deviceFile = ArtifactCleanup.contains(file.path, in: root)
-            guard ownerFile || deviceFile else { return false }
-            guard let pid = file.pid, let executable = usage.processes[pid] else { return true }
-            if ArtifactCleanup.isSimulatorSystemExecutable(executable) { return false }
-            if ArtifactCleanup.contains(executable, in: root + "/data/Containers/Bundle/Application") { return false }
-            if usage.consoleTargets[pid] == device.udid.lowercased() { return false }
-            // Unknown console targets and other processes remain protected.
-            return true
-        }
-    }
-
-    func ios(sessions: [WorktreeArchiveState.Session], apply: Bool, exclusions: [String], report: inout CleanupReport) async throws {
+    func ios(apply: Bool, exclusions: [String], report: inout CleanupReport) async throws {
         let records = try store.all(ArtifactSimulator.self, in: "simulators")
         guard !records.isEmpty else { return }
         let list = try await inventory()
@@ -105,8 +84,8 @@ struct ArchivedDeviceCleanup: Sendable {
                 let paths = Set(record.owners.map(\.worktreePath))
                 guard UUID(uuidString: record.udid) != nil, !ArtifactStore.isStandardSimulator(record.name),
                       !excluded(paths, exclusions), let device = current else { continue }
-                guard let proof = evidence(sessions, paths: paths, name: record.name, boundAt: record.lastUsedAt) else {
-                    report.actions.append(action("archive-ownership-unverified-or-active", "preserved")); continue
+                guard try allMissing(paths) else {
+                    report.actions.append(action("worktree-exists-or-ownership-unknown", "preserved")); continue
                 }
                 guard ["Booted", "Shutdown"].contains(device.state) else {
                     report.actions.append(action("transitioning-device", "preserved")); continue
@@ -122,16 +101,15 @@ struct ArchivedDeviceCleanup: Sendable {
                 func unchanged() throws -> Bool {
                     guard let fresh = try store.read(ArtifactSimulator.self, at: store.simulatorURL(record.udid)),
                           fresh.name == record.name, fresh.owners == record.owners, fresh.lastUsedAt == record.lastUsedAt else { return false }
-                    return try evidence(archive.sessions(), paths: paths, name: record.name, boundAt: record.lastUsedAt) == proof
+                    return try allMissing(paths)
                 }
-                guard try unchanged(), try await !busy(inspector.externalUsage(globalBuildGuard: false), device: device, owners: record.owners) else {
-                    report.actions.append(action("archive-changed-or-external-use", "preserved")); continue
+                guard try unchanged() else {
+                    report.actions.append(action("worktree-or-owner-changed", "preserved")); continue
                 }
-                if !apply { report.actions.append(action("archived-worktree", "would-remove")); continue }
+                if !apply { report.actions.append(action("missing-worktree", "would-remove")); continue }
                 guard let fresh = try await inventory().first(where: { $0.udid == device.udid }),
                       fresh.name == record.name, fresh.state == device.state,
-                      fresh.lastBootedAt == device.lastBootedAt, fresh.lastUsedAt == device.lastUsedAt,
-                      try unchanged() else { report.actions.append(action("usage-or-archive-changed", "preserved")); continue }
+                      try unchanged() else { report.actions.append(action("device-or-worktree-changed", "preserved")); continue }
                 if fresh.state == "Booted" {
                     outcome = "shutdown-unconfirmed"
                     _ = try await simctl(["shutdown", fresh.udid])
@@ -144,9 +122,8 @@ struct ArchivedDeviceCleanup: Sendable {
                 }
                 guard let final = try await inventory().first(where: { $0.udid == device.udid }),
                       final.state == "Shutdown", final.name == record.name,
-                      final.lastBootedAt == current?.lastBootedAt, final.lastUsedAt == current?.lastUsedAt,
-                      try unchanged(), try await !busy(inspector.externalUsage(globalBuildGuard: false), device: final, owners: record.owners) else {
-                    report.actions.append(action("usage-or-archive-changed-before-delete", outcome)); continue
+                      try unchanged() else {
+                    report.actions.append(action("device-or-worktree-changed-before-delete", outcome)); continue
                 }
                 outcome = "deletion-unconfirmed"
                 _ = try await simctl(["delete", final.udid])
@@ -155,7 +132,7 @@ struct ArchivedDeviceCleanup: Sendable {
                 }
                 outcome = "removed"
                 try FileManager.default.removeItem(at: store.simulatorURL(record.udid))
-                report.actions.append(action("archived-worktree", outcome))
+                report.actions.append(action("missing-worktree", outcome))
             } catch {
                 report.error = report.error ?? String(describing: error)
                 report.actions.append(action(String(describing: error), outcome))
@@ -227,17 +204,25 @@ struct ArchivedDeviceCleanup: Sendable {
             try await group.next()
         }
     }
-    func android(sessions: [WorktreeArchiveState.Session], apply: Bool, exclusions: [String], report: inout CleanupReport) async throws {
+    func android(apply: Bool, exclusions: [String], report: inout CleanupReport) async throws {
         guard FileManager.default.fileExists(atPath: androidHome.path) else { return }
         let inis = try FileManager.default.contentsOfDirectory(at: androidHome, includingPropertiesForKeys: nil).filter { $0.pathExtension == "ini" }
+        let owners = try store.all(ArtifactProject.self, in: "projects")
         var running: [String: String]?
         for ini in inis {
             var outcome = "preserved"
             do {
-                guard let device = try avd(ini), !excluded([device.cwd], exclusions),
-                      let proof = evidence(sessions, paths: [device.cwd], name: device.name, boundAt: device.launchedAt) else { continue }
+                guard let device = try avd(ini), !excluded([device.cwd], exclusions) else { continue }
+                // A launch cwd may be a subproject inside a recorded worktree.
+                // A removed subdirectory must not make that existing owner eligible.
+                let ownerPath = owners.map(\.owner.worktreePath)
+                    .filter { ArtifactCleanup.contains(device.cwd, in: $0) }
+                    .max(by: { $0.count < $1.count }) ?? device.cwd
+                guard !excluded([ownerPath], exclusions), try allMissing([ownerPath]) else {
+                    report.actions.append(.init(target: device.path.path, reason: "worktree-exists-or-ownership-unknown", outcome: "preserved", name: device.name)); continue
+                }
                 func unchanged() throws -> Bool {
-                    try avd(ini) == device && evidence(archive.sessions(), paths: [device.cwd], name: device.name, boundAt: device.launchedAt) == proof
+                    try avd(ini) == device && allMissing([ownerPath])
                 }
                 guard let lease = try ArtifactLease.tryAcquire(store.root.appendingPathComponent("locks/avd-\(ArtifactStore.key(device.path.path)).lock")) else {
                     report.actions.append(.init(target: device.path.path, reason: "concurrent-avd-cleanup", outcome: outcome)); continue
@@ -251,10 +236,9 @@ struct ArchivedDeviceCleanup: Sendable {
                 if running == nil { running = try await runningAVDs() }
                 let serials = (running ?? [:]).filter { $0.value == device.name }.map(\.key)
                 guard serials.count <= 1 else { throw OrchardError.message("Multiple running instances of AVD") }
-                let usage = try await inspector.externalUsage(globalBuildGuard: false)
-                guard !usage.contains([device.cwd]), try unchanged() else { throw OrchardError.message("Archive changed or worktree still in use") }
+                guard try unchanged() else { throw OrchardError.message("Worktree or device association changed") }
                 if !apply {
-                    report.actions.append(.init(target: device.path.path, reason: "archived-worktree", outcome: "would-remove", name: device.name,
+                    report.actions.append(.init(target: device.path.path, reason: "missing-worktree", outcome: "would-remove", name: device.name,
                         state: serials.isEmpty ? "Shutdown" : "Booted", requiresShutdown: !serials.isEmpty)); continue
                 }
                 guard try unchanged(), try await runningAVDs() == running else { throw OrchardError.message("Emulator identity changed") }
@@ -264,15 +248,9 @@ struct ArchivedDeviceCleanup: Sendable {
                     try await waitForShutdown(serial)
                     outcome = "stopped-preserved"
                 }
-                // ADB disappearing is not proof that QEMU released disk files.
-                // Query all process arguments and fail closed on an exact AVD
-                // argument (including an instance not reachable through ADB).
-                let processes = try await command("/bin/ps", ["-axo", "args="])
-                guard !processes.split(separator: "\n").contains(where: { line in
-                    let args = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-                    return args.contains("@" + device.name) || args.enumerated().contains { index, arg in arg == "-avd" && index + 1 < args.count && args[index + 1] == device.name }
-                }), try unchanged(), try await !inspector.externalUsage(globalBuildGuard: false).contains([device.cwd, device.path.path]),
-                    try await !runningAVDs().values.contains(device.name) else { throw OrchardError.message("AVD still in use or archive changed") }
+                guard try unchanged(), try await !runningAVDs().values.contains(device.name) else {
+                    throw OrchardError.message("Emulator still running or worktree association changed")
+                }
                 outcome = "deletion-unconfirmed"
                 var args = ["ANDROID_AVD_HOME=\(androidHome.path)"]
                 if let java { args.append("JAVA_HOME=\(java)") }
@@ -283,7 +261,7 @@ struct ArchivedDeviceCleanup: Sendable {
                 }
                 outcome = "removed"
                 running = nil
-                report.actions.append(.init(target: device.path.path, reason: "archived-worktree", outcome: outcome, name: device.name))
+                report.actions.append(.init(target: device.path.path, reason: "missing-worktree", outcome: outcome, name: device.name))
             } catch {
                 report.error = report.error ?? String(describing: error)
                 report.actions.append(.init(target: ini.path, reason: String(describing: error), outcome: outcome))

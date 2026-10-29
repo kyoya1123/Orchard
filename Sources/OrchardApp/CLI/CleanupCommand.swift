@@ -6,9 +6,9 @@ import OrchardCore
 struct CleanupCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "cleanup",
         abstract: "Inspect unused worktree Simulators and DerivedData. Pass --apply to remove them.")
-    @Flag(name: .long, help: "Apply the inspected cleanup policy. Simulator deletion permanently removes its apps and data.")
+    @Flag(name: .long, help: "Apply the inspected cleanup policy. Device deletion removes its apps and data.")
     var apply = false
-    @Option(name: .long, help: "all, archived-devices (iOS and Android), simulators, derived-data, or source-packages. Defaults to all.")
+    @Option(name: .long, help: "all, orphaned-devices (iOS and Android; archived-devices is an alias), simulators, derived-data, or source-packages. Defaults to all.")
     var scope = "all"
     @Flag(name: .long, help: "Use existing ownership records without discovering additional projects.")
     var noDiscover = false

@@ -28,9 +28,9 @@ public struct CleanupInvocation: Sendable {
 
     public func drain(directories: [URL]) async {
         await drain {
-            // Archived-device ownership must already be recorded. Avoid an
+            // Device ownership must already be recorded. Avoid an
             // unrelated repository scan on every CLI/GUI invocation.
-            await ArtifactCleanup().run(apply: true, directories: directories, discover: false, scope: .archivedDevices)
+            await ArtifactCleanup().run(apply: true, directories: directories, discover: false, scope: .orphanedDevices)
         }
     }
 

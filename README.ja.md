@@ -48,33 +48,22 @@ Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使い�
 
 ## バックグラウンドでの整理
 
-Orchardの起動・再オープン時、GUIからの実行時、CLIの`run`・`list`・`runs`・`simulator`を呼ぶたびに、アーカイブ済みworktreeの端末を確認します。ヘルプとcleanupのプレビューでは削除を予約しません。既存の所有記録を使い、CPU・ディスクI/Oの優先度を下げた別プロセスで動かします。同時要求をまとめ、整理中に届いた要求は次の検査で処理します。ロック待機・競合時の再試行には期限があり、失敗した要求は次回の呼び出しまで保留します。
+Orchardの起動・再オープン時、GUIからの実行時、CLIの`run`・`list`・`runs`・`simulator`を呼ぶたびに、所有元の分かる端末を確認します。ヘルプとcleanupのプレビューでは削除を予約しません。自動検査は既存の所有記録と`orphaned-devices`だけを使い、期限付きのロック・再試行と要求の集約を備えた別プロセスで動かします。失敗した要求は次回の呼び出しまで保留します。
 
-自動検査の対象は`archived-devices`（iOS・Android）だけです。Claude/Codexのライフサイクル情報で、対応する全所有元がアーカイブ済みと確認できた端末を対象にします。同じブランチに未アーカイブの所有元がある場合、所有元が曖昧な場合、情報を読めない場合は保持します。起動中の対象端末だけを停止し、所有元・識別子・利用状況を再検査して削除します。対象iOS端末内のアプリとその端末専用のコンソールは終了できますが、他端末や未知の利用者は保護します。AndroidはAVDの配置と起動記録を検証し、停止とファイル解放を確認します。Simulator全体を終了する操作は行いません。
+**関連する全worktreeのパスが存在しないと確認できた端末だけ**が対象です。worktreeが存在すれば、古さ・merge状況・Claude/Codexのアーカイブ状態によらず保持します。所有元不明、アクセス不能、壊れたリンク、端末名変更、識別情報の不一致も保持します。端末整理ではセッションDB・会話ファイル・プロセス一覧を読みません。iOSはOrchardが記録したUDIDとプロジェクトの対応、Androidは検証済みのAVD登録と起動記録で関連付けます。
 
-以下の保持期間による整理は、明示的な`cleanup`の各scopeで利用できます。
-
-- ブランチ用Simulatorは、記録されたworktreeが消失した場合、または停止中で最終利用から**1日を超えた**場合に候補になります。起動中は現在も利用中と扱い、起動日時が古いだけでは対象にしません。CoreSimulatorのlastUsedAt・lastBootedAtとOrchardの利用記録のうち新しい日時を使い、ファイルのmtimeでは判定しません。日時不明なら年齢条件では削除しません。
-- 全ての現存所有元が、ローカルに保存されたorigin/HEADの履歴へ取り込み済みのcleanな非デフォルトブランチである場合も候補です。正規化したブランチ名とSimulator名の一致を確認し、別ブランチに再利用されたworktreeを誤判定しません。GitHubの最新PR状態は問い合わせず、fetch・prune・Gitの変更も行いません。squash mergeは検出できない場合があります。
-- **起動中でも、worktree消失またはmerge済みを確認できた端末は停止・削除の候補**になります。ただし実行中アプリ、コンソール、デバッガ、ビルドや所有元worktreeの利用があれば保持します。端末のファイルを開く既知のOS常駐処理だけは利用判定から外し、未知のプロセスは保持理由にします。状態遷移中、標準名端末、専用base、名前を変更した端末、所有者不明の端末も保護します。
-- Orchardのビルド・準備・インストールは排他ロックで保護します。外部ビルド、worktreeやSimulator内のファイルを開いているプロセスも確認し、削除直前に再検証します。開いたままのシェルやコンソール接続により、保守的に整理を見送る場合があります。
-- DerivedDataの保持期間は従来の**7日間**です。worktree消失も対象ですが、使用中や変更された依存物は保持します。worktree自体、ブランチ、ソースは削除しません。
-- 管理するSourcePackagesは、対応する所有記録・固定バージョンと一致し、worktreeが消失し、使用中でなく、checkoutに編集・ローカルcommit・未追跡ファイル等がない場合だけ回収します。未知のファイルや検査エラーがあれば保持します。既存キャッシュは更新版で次に利用した際に所有記録を持ちます。記録のないものをハッシュだけで推測して削除しません。
-
-`orchard cleanup --json`で候補を確認します。名前・UDID・観測した状態・停止の必要性（`requiresShutdown`）・最終利用日時・容量の目安・削除または保持する理由を表示し、停止や削除はしません。実行時は対象端末だけを停止し、その後も状態・利用・所有元を再検査します。停止を確認できなければ再試行せず削除を見送り、停止後に利用が始まった場合は`stopped-preserved`として端末を残します。ただし所有記録、レポート、ロックファイルは更新する場合があります。容量表示にはAPFS共有ブロックが重複して含まれ得るため、実回収量は別途空き容量で確認してください。
-
-対象は`--scope archived-devices`、`--scope simulators`、`--scope derived-data`、`--scope source-packages`で限定できます（既定all）。`--no-discover`は既存の所有記録だけを使用します。
+対象が起動中なら、iOSはそのUDIDを`simctl`で停止・削除し、Androidは対応するADBシリアルだけを停止して`avdmanager`で削除します。削除直前にworktree・所有元・端末識別子を再確認します。停止を確認できなければ削除せず、他の端末・worktree・ブランチ・ソースは変更しません。端末を削除すると、その中のアプリと保存データも失われます。
 
 ```sh
-orchard cleanup --scope archived-devices --no-discover
-orchard cleanup --scope archived-devices --no-discover --apply
+orchard cleanup --scope orphaned-devices --no-discover --json
+orchard cleanup --scope orphaned-devices --no-discover --apply --json
 ```
 
-`--apply`は実際に削除します。Simulator内のアプリや保存データも失われます。Go・Gradle・npm、DeviceSupport、Simulatorランタイムはこの整理処理の対象外です。
+旧`archived-devices`は互換エイリアスで、アーカイブ情報は読みません。`simulators`は同じworktree存在条件をiOSだけに適用します。明示的な`derived-data`・`source-packages`は従来のキャッシュ整理を維持しますが、自動検査では呼びません。明示的なcleanupの既定scopeは`all`です。
 
-所有記録と結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は同ディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。自動検査の失敗や期限超過は`invocation-error.json`に記録し、後の検査が成功したら消去します。隔離テストでは`ORCHARD_DISABLE_BACKGROUND_CLEANUP=1`で自動workerを無効にできます。
+プレビューでは停止・削除を行わず、端末ID・名前・状態・保持／削除理由を表示します。所有記録、`last-report.json`、呼び出しの保留・完了記録は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。失敗は`invocation-error.json`に記録し、後の検査が成功したら消去します。隔離テストでは`ORCHARD_DISABLE_BACKGROUND_CLEANUP=1`で自動workerを無効にできます。
 
-これは保持期間の制御で、容量の上限ではありません。削除した成果物は次回利用時に再ビルドします。cronやLaunchAgentの登録は不要です。Orchardを使わない間は整理せず、次の利用時に実行します。
+cronやLaunchAgentは登録しません。Go・Gradle・npm、DeviceSupport、Simulatorランタイム、ソースworktreeは自動整理の対象外です。
 
 ## 動作環境
 

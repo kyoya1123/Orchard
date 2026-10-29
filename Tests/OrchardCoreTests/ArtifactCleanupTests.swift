@@ -29,7 +29,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let commands = CleanupCommands()
         let date = clock
         let worker = ArtifactCleanup(store: store, derivedData: root.appendingPathComponent("DerivedData"),
-            devices: root.appendingPathComponent("Devices"), now: { date }, command: { tool, args in
+            devices: root.appendingPathComponent("Devices"), deviceHome: root, deviceEnvironment: [:], now: { date }, command: { tool, args in
                 if realGit && tool == "/usr/bin/git" {
                     return try await ProcessRunner.run(executableURL: URL(fileURLWithPath: tool),
                         arguments: args, currentDirectoryURL: nil)
@@ -60,7 +60,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         return path
     }
 
-    func testArchivedScopeDoesNotCollectUnrelatedDerivedDataOrPackages() async throws {
+    func testOrphanedScopeDoesNotCollectUnrelatedDerivedDataOrPackages() async throws {
         let f = try fixture(existing: false)
         let dd = try cache(f)
         let packages = f.root.appendingPathComponent("packages")
@@ -68,9 +68,9 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("invalid ownership; must not be inspected in archive-only scope".utf8).write(to: marker)
         let worker = ArtifactCleanup(store: f.store, derivedData: f.worker.derivedData, devices: f.worker.devices,
-            sourcePackages: packages, archiveHome: f.root, archiveEnvironment: [:],
+            sourcePackages: packages, deviceHome: f.root, deviceEnvironment: [:],
             command: { _, _ in XCTFail("No device records should require commands"); return "" })
-        let report = await worker.run(apply: true, discover: false, scope: .archivedDevices)
+        let report = await worker.run(apply: true, discover: false, scope: .orphanedDevices)
         XCTAssertNil(report.error)
         XCTAssertTrue(report.actions.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
@@ -107,7 +107,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(report.error)
         XCTAssertFalse(FileManager.default.fileExists(atPath: expired.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path))
-        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "preserved" })
         XCTAssertEqual(try String(contentsOfFile: f.owner.worktreePath + "/Source.swift", encoding: .utf8), "uncommitted source")
     }
 
@@ -161,12 +161,8 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let locked = await f.worker.run(apply: true, discover: false)
         XCTAssertTrue(locked.actions.contains { $0.reason == "active-build-or-install" })
         lease.close()
-        await f.commands.bootDuringInspection(id)
-        let raced = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(raced.actions.contains { $0.outcome == "preserved" })
-        let calls = await f.commands.verbs
-        XCTAssertFalse(calls.contains("shutdown"))
-        XCTAssertFalse(calls.contains("delete"))
+        let unlocked = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(unlocked.actions.contains { $0.outcome == "removed" })
     }
 
     func testAnyExistingOwnerPreservesRecentSharedSimulator() async throws {
@@ -293,14 +289,14 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
 
     func testSimulatorOneDayBoundaryUsesMetadataAndDoesNotTouchDerivedData() async throws {
         let f = try fixture()
-        let old = try await simulator(f, age: ArtifactCleanup.simulatorRetention + 1)
-        let boundary = try await simulator(f, age: ArtifactCleanup.simulatorRetention)
-        let recent = try await simulator(f, age: ArtifactCleanup.simulatorRetention - 1)
+        let old = try await simulator(f, age: 86400 + 1)
+        let boundary = try await simulator(f, age: 86400)
+        let recent = try await simulator(f, age: 86400 - 1)
         let dd = try cache(f, age: 9 * 86400)
         let preview = await f.worker.run(apply: false, discover: false, scope: .simulators)
-        XCTAssertEqual(preview.actions.filter { $0.outcome == "would-remove" }.map(\.target), [old])
+        XCTAssertTrue(preview.actions.allSatisfy { $0.outcome == "preserved" })
         let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-        XCTAssertTrue(report.actions.contains { $0.target == old && $0.reason == "unused-over-1-day" && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == old && $0.outcome == "preserved" })
         XCTAssertTrue(report.actions.contains { $0.target == boundary && $0.outcome == "preserved" })
         XCTAssertTrue(report.actions.contains { $0.target == recent && $0.outcome == "preserved" })
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
@@ -315,7 +311,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let recent = try await simulator(f, age: 9 * 86400)
         await f.commands.setDates(recent, used: nil, booted: ISO8601DateFormatter().string(from: clock))
         let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-        XCTAssertTrue(report.actions.contains { $0.target == unknown && $0.reason == "unknown-last-use" })
+        XCTAssertTrue(report.actions.contains { $0.target == unknown && $0.reason == "worktree-exists-or-ownership-unknown" })
         XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
     }
 
@@ -326,7 +322,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
             if externalBuild { await f.commands.setBusy(external: true) }
             else { await f.commands.setOpenPath(f.owner.worktreePath) }
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            XCTAssertTrue(report.actions.contains { $0.reason == "external-use" && $0.outcome == "preserved" })
+            XCTAssertTrue(report.actions.contains { $0.reason == "worktree-exists-or-ownership-unknown" && $0.outcome == "preserved" })
             let calls = await f.commands.verbs
             XCTAssertFalse(calls.contains("delete"))
         }
@@ -339,11 +335,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
             let id = try await simulator(f, state: state)
             await f.commands.setMerge(mode, worktree: f.owner.worktreePath)
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            if mode == "merged" {
-                XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "merged-into-cached-origin-default" && $0.outcome == "removed" })
-            } else {
-                XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" }, mode)
-            }
+            XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "preserved" }, mode)
         }
       }
     }
@@ -354,14 +346,14 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
             _ = try await simulator(f, state: state, age: 10 * 86400)
             let result = await f.worker.run(apply: true, discover: false, scope: .simulators)
             XCTAssertEqual(result.actions.first?.outcome, "preserved", state)
-            XCTAssertEqual(result.actions.first?.reason, state == "Booted" ? "booted-with-live-unmerged-owner" : "transitioning-or-unknown-state")
+            XCTAssertEqual(result.actions.first?.reason, state == "Booted" ? "worktree-exists-or-ownership-unknown" : "transitioning-device")
             let calls = await f.commands.verbs
             XCTAssertFalse(calls.contains("shutdown"))
             XCTAssertFalse(calls.contains("delete"))
         }
     }
 
-    func testBootedOrphanKeepsActiveAppsConsolesWorktreesAndBuilds() async throws {
+    func testBootedOrphanDoesNotInferActivityFromProcesses() async throws {
         for mode in ["build", "worktree", "user-app", "console", "unknown-process", "debugger", "lease"] {
             let f = try fixture(existing: false)
             let id = try await simulator(f, state: "Booted")
@@ -380,10 +372,9 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
             }
             defer { lease?.close() }
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            XCTAssertEqual(report.actions.first?.outcome, "preserved", mode)
+            XCTAssertEqual(report.actions.first?.outcome, mode == "lease" ? "preserved" : "removed", mode)
             let calls = await f.commands.verbs
-            XCTAssertFalse(calls.contains("shutdown"), mode)
-            XCTAssertFalse(calls.contains("delete"), mode)
+            XCTAssertEqual(calls.contains("delete"), mode != "lease", mode)
         }
     }
 
@@ -402,12 +393,12 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
     }
 
     func testShutdownFailureOrNewUseNeverContinuesToDelete() async throws {
-        for mode in ["failure", "unconfirmed", "new-build", "reboot"] {
+        for mode in ["failure", "unconfirmed", "reboot"] {
             let f = try fixture(existing: false)
             _ = try await simulator(f, state: "Booted")
             await f.commands.setShutdownBehavior(mode)
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            XCTAssertEqual(report.actions.first?.outcome, ["failure", "unconfirmed"].contains(mode) ? "shutdown-unconfirmed" : "stopped-preserved", mode)
+            XCTAssertEqual(report.actions.first?.outcome, "shutdown-unconfirmed", mode)
             let calls = await f.commands.verbs
             XCTAssertEqual(calls.filter { $0 == "shutdown" }.count, 1)
             XCTAssertFalse(calls.contains("delete"))
@@ -488,7 +479,6 @@ actor CleanupCommands {
             return externalBuild ? "123 /usr/bin/xcodebuild\n" : processListing
         }
         if tool == "/usr/sbin/lsof" {
-            if let id = bootOnInspection { devices[id]?["state"] = "Booted"; bootOnInspection = nil }
             return fileListing + (openPath.isEmpty ? "" : "n" + openPath + "\n")
         }
         if tool == "/usr/bin/git" {
@@ -510,6 +500,7 @@ actor CleanupCommands {
         verbs.append(verb)
         switch verb {
         case "list":
+            if let id = bootOnInspection { devices[id]?["state"] = "Booted"; bootOnInspection = nil }
             return String(decoding: try JSONSerialization.data(withJSONObject: ["devices": ["runtime": Array(devices.values)]]), as: UTF8.self)
         case "shutdown":
             if shutdownFails || shutdownBehavior == "failure" { throw OrchardError.message("Shutdown failed") }

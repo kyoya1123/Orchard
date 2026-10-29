@@ -2,17 +2,17 @@ import Foundation
 @testable import OrchardCore
 import XCTest
 
-final class ArchivedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
+final class OrphanedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
     struct Fixture {
         let root: URL
-        let worker: ArchivedDeviceCleanup
+        let worker: OrphanedDeviceCleanup
         let commands: AndroidCleanupCommands
         let avd: URL
         let ini: URL
-        let session: URL
+        let worktree: URL
     }
 
-    func fixture(archived: Bool = true, shared: Bool = false) throws -> Fixture {
+    func fixture(existing: Bool = false) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("AndroidCleanup-\(UUID())").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -28,26 +28,19 @@ final class ArchivedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.createDirectory(at: avd, withIntermediateDirectories: true)
         let ini = avdHome.appendingPathComponent("feature-example.ini")
         try Data("path=\(avd.path)\n".utf8).write(to: ini)
+        let worktree = root.appendingPathComponent("worktree")
+        if existing { try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true) }
         let emulator = sdk.appendingPathComponent("emulator/emulator").path
-        try Data("/work\n\(emulator)\n3\n\(emulator)\n-avd\nfeature-example\n".utf8)
+        try Data("\(worktree.path)\n\(emulator)\n3\n\(emulator)\n-avd\nfeature-example\n".utf8)
             .write(to: avd.appendingPathComponent("emu-launch-params.txt"))
         try Data("device data".utf8).write(to: avd.appendingPathComponent("userdata.img"))
-        let sessions = root.appendingPathComponent("Library/Application Support/Claude/claude-code-sessions/account/org")
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        let session = sessions.appendingPathComponent("local_one.json")
-        try JSONSerialization.data(withJSONObject: ["sessionId": "one", "cwd": "/work", "branch": "feature/example",
-            "isArchived": archived, "createdAt": 100000]).write(to: session)
-        if shared {
-            try JSONSerialization.data(withJSONObject: ["sessionId": "two", "cwd": "/work", "branch": "feature/example",
-                "isArchived": false, "createdAt": 100000]).write(to: sessions.appendingPathComponent("local_two.json"))
-        }
-        let commands = AndroidCleanupCommands(avd: avd, ini: ini, session: session)
-        let worker = ArchivedDeviceCleanup(store: ArtifactStore(root: root.appendingPathComponent("state")),
+        let commands = AndroidCleanupCommands(avd: avd, ini: ini, worktree: worktree)
+        let worker = OrphanedDeviceCleanup(store: ArtifactStore(root: root.appendingPathComponent("state")),
             devices: root.appendingPathComponent("Devices"), home: root, environment: [:],
             shutdownTimeout: .milliseconds(100), shutdownPollInterval: .milliseconds(10)) { tool, args in
                 try await commands.run(tool, args)
             }
-        return Fixture(root: root, worker: worker, commands: commands, avd: avd, ini: ini, session: session)
+        return Fixture(root: root, worker: worker, commands: commands, avd: avd, ini: ini, worktree: worktree)
     }
 
     func testPreviewThenTargetedStopDeletePreservesOtherEmulator() async throws {
@@ -72,18 +65,18 @@ final class ArchivedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.avd.path))
     }
 
-    func testNonArchivedSharedAndExcludedOwnersAreNeverStopped() async throws {
-        for mode in ["active", "shared", "excluded"] {
-            let f = try fixture(archived: mode != "active", shared: mode == "shared")
-            _ = await f.worker.run(apply: true, excludedPaths: mode == "excluded" ? ["/work"] : [])
+    func testExistingAndExcludedWorktreesAreNeverStopped() async throws {
+        for mode in ["existing", "excluded"] {
+            let f = try fixture(existing: mode == "existing")
+            _ = await f.worker.run(apply: true, excludedPaths: mode == "excluded" ? [f.worktree.path] : [])
             let mutations = await f.commands.mutations
             XCTAssertTrue(mutations.isEmpty, mode)
             XCTAssertTrue(FileManager.default.fileExists(atPath: f.avd.path))
         }
     }
 
-    func testShutdownFailureOrArchiveChangePreventsDeletion() async throws {
-        for mode in ["fail-kill", "unarchive"] {
+    func testShutdownFailureOrRecreatedWorktreePreventsDeletion() async throws {
+        for mode in ["fail-kill", "recreate"] {
             let f = try fixture()
             await f.commands.setMode(mode)
             let result = await f.worker.run(apply: true)
@@ -108,18 +101,6 @@ final class ArchivedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.avd.path))
     }
 
-    func testLingeringQEMUAndOpenAVDFilesPreventDeletion() async throws {
-        for mode in ["qemu-avd", "qemu-at", "open-avd-file"] {
-            let f = try fixture()
-            await f.commands.setMode(mode)
-            let result = await f.worker.run(apply: true)
-            XCTAssertEqual(result.actions.first?.outcome, "stopped-preserved", mode)
-            let mutations = await f.commands.mutations
-            XCTAssertFalse(mutations.contains("delete:feature-example"), mode)
-            XCTAssertTrue(FileManager.default.fileExists(atPath: f.avd.path))
-        }
-    }
-
     func testUnknownLaunchReceiptDoesNotAuthorizeDeletion() async throws {
         let f = try fixture()
         try Data("unknown".utf8).write(to: f.avd.appendingPathComponent("emu-launch-params.txt"))
@@ -128,31 +109,31 @@ final class ArchivedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(mutations.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.avd.path))
     }
+
+    func testMissingLaunchSubdirectoryDoesNotRemoveExistingRecordedWorktreeDevice() async throws {
+        let f = try fixture()
+        let owner = ArtifactOwner(projectPath: f.root.appendingPathComponent("App.xcodeproj").path,
+            worktreePath: f.root.path, repositoryPath: f.root.path)
+        try f.worker.store.write(ArtifactProject(owner: owner, lastUsedAt: 0), to: f.worker.store.projectURL(owner.projectPath))
+        let result = await f.worker.run(apply: true)
+        XCTAssertEqual(result.actions.first?.outcome, "preserved")
+        let mutations = await f.commands.mutations
+        XCTAssertTrue(mutations.isEmpty)
+    }
 }
 
 actor AndroidCleanupCommands {
     let avd: URL
     let ini: URL
-    let session: URL
+    let worktree: URL
     var running = ["emulator-5554": "feature-example", "emulator-5556": "unrelated"]
     var mutations: [String] = []
     var mode = ""
     var killed = false
-    init(avd: URL, ini: URL, session: URL) { self.avd = avd; self.ini = ini; self.session = session }
+    init(avd: URL, ini: URL, worktree: URL) { self.avd = avd; self.ini = ini; self.worktree = worktree }
     func setMode(_ value: String) { mode = value }
 
     func run(_ tool: String, _ args: [String]) async throws -> String {
-        if tool == "/bin/ps" {
-            if args == ["-axo", "args="] {
-                if mode == "qemu-avd" { return "qemu -avd feature-example" }
-                if mode == "qemu-at" { return "emulator @feature-example" }
-                return ""
-            }
-            return mode == "open-avd-file" ? "99 /tools/reader" : ""
-        }
-        if tool == "/usr/sbin/lsof" {
-            return killed && mode == "open-avd-file" ? "p99\nn\(avd.path)/userdata.img\n" : ""
-        }
         if tool.hasSuffix("/platform-tools/adb") {
             if args == ["devices"] {
                 if killed && mode == "slow-after-kill" { try await Task.sleep(for: .seconds(30)) }
@@ -166,10 +147,8 @@ actor AndroidCleanupCommands {
                 if mode == "fail-kill" { throw OrchardError.message("Synthetic kill failure") }
                 killed = true
                 running.removeValue(forKey: "emulator-5554")
-                if mode == "unarchive" {
-                    var value = try JSONSerialization.jsonObject(with: Data(contentsOf: session)) as! [String: Any]
-                    value["isArchived"] = false
-                    try JSONSerialization.data(withJSONObject: value).write(to: session)
+                if mode == "recreate" {
+                    try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
                 }
                 return "OK"
             }

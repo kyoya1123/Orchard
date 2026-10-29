@@ -18,30 +18,28 @@ public struct CleanupReport: Codable, Sendable {
 }
 
 public struct ArtifactCleanup: Sendable {
-    public enum Scope: String, Sendable { case all, simulators, archivedDevices = "archived-devices", derivedData = "derived-data", sourcePackages = "source-packages" }
+    public enum Scope: String, Sendable { case all, simulators, orphanedDevices = "orphaned-devices", archivedDevices = "archived-devices", derivedData = "derived-data", sourcePackages = "source-packages" }
     typealias Command = @Sendable (String, [String]) async throws -> String
     let store: ArtifactStore
     let derivedData: URL
     let devices: URL
     let sourcePackages: URL?
-    let includeArchives: Bool
-    let archiveHome: URL
-    let archiveEnvironment: [String: String]
+    let deviceHome: URL
+    let deviceEnvironment: [String: String]
     let command: Command
     let now: @Sendable () -> Date
     static let retention: TimeInterval = 7 * 86400
-    static let simulatorRetention: TimeInterval = 86400
 
     public init() {
         self.init(store: ArtifactStore(),
                   derivedData: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData"),
                   devices: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
-                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"), includeArchives: true)
+                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"))
     }
 
-    init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil, includeArchives: Bool = false,
-         archiveHome: URL = FileManager.default.homeDirectoryForCurrentUser,
-         archiveEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+    init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil,
+         deviceHome: URL = FileManager.default.homeDirectoryForCurrentUser,
+         deviceEnvironment: [String: String] = ProcessInfo.processInfo.environment,
          now: @escaping @Sendable () -> Date = { Date() },
          command: @escaping Command = { executable, arguments in
              // CoreSimulator IPC can stall even for `list` at background QoS.
@@ -54,9 +52,8 @@ public struct ArtifactCleanup: Sendable {
         self.derivedData = derivedData
         self.devices = devices
         self.sourcePackages = sourcePackages
-        self.includeArchives = includeArchives
-        self.archiveHome = archiveHome
-        self.archiveEnvironment = archiveEnvironment
+        self.deviceHome = deviceHome
+        self.deviceEnvironment = deviceEnvironment
         self.now = now
         self.command = command
     }
@@ -88,14 +85,12 @@ public struct ArtifactCleanup: Sendable {
                 if apply { try drainTrash(report: &report) }
                 try await cleanDerivedData(owners: owners, settings: settings, apply: apply, report: &report)
             }
-            if scope == .archivedDevices || (scope == .all && includeArchives) {
-                let archived = await ArchivedDeviceCleanup(store: store, devices: devices, home: archiveHome,
-                    environment: archiveEnvironment, command: command).run(apply: apply, excludedPaths: settings.excludedPaths)
-                report.actions += archived.actions
-                if let error = archived.error { report.error = error }
-            }
-            if scope == .all || scope == .simulators {
-                try await cleanSimulators(settings: settings, apply: apply, report: &report)
+            if [.all, .simulators, .orphanedDevices, .archivedDevices].contains(scope) {
+                let devicesReport = await OrphanedDeviceCleanup(store: store, devices: devices, home: deviceHome,
+                    environment: deviceEnvironment, command: command).run(apply: apply,
+                        excludedPaths: settings.excludedPaths, includeAndroid: scope != .simulators)
+                report.actions += devicesReport.actions
+                if let error = devicesReport.error { report.error = error }
             }
             if scope == .all || scope == .sourcePackages {
                 try await cleanSourcePackages(owners: owners, settings: settings, apply: apply, report: &report)
@@ -318,46 +313,6 @@ public struct ArtifactCleanup: Sendable {
     }
 
     // CoreSimulator/Orchard usage metadata only; directory mtimes are not usage.
-    private func lastUse(_ record: ArtifactSimulator, _ device: Device) -> Double? {
-        [record.lastUsedAt > 0 ? record.lastUsedAt : nil,
-         Self.epoch(device.lastUsedAt), Self.epoch(device.lastBootedAt)].compactMap { $0 }.max()
-    }
-
-    private func mergedOwner(_ owner: ArtifactOwner, simulatorName: String) async throws -> Bool {
-        guard owner.worktreePath != owner.repositoryPath, try worktreeExists(owner) else { return false }
-        func git(_ path: String, _ args: [String]) async throws -> String {
-            try await command("/usr/bin/git", ["--no-optional-locks", "-C", path,
-                "-c", "core.fsmonitor=false"] + args).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard try await git(owner.worktreePath, ["rev-parse", "--show-toplevel"]) == owner.worktreePath else { return false }
-        let branch = try await git(owner.worktreePath, ["symbolic-ref", "-q", "HEAD"])
-        let base = try await git(owner.repositoryPath, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
-        guard branch.hasPrefix("refs/heads/"), base.hasPrefix("refs/remotes/origin/"),
-              String(branch.dropFirst("refs/heads/".count)).replacingOccurrences(of: "/", with: "-") == simulatorName,
-              branch != "refs/heads/" + base.dropFirst("refs/remotes/origin/".count),
-              try await git(owner.worktreePath, ["status", "--porcelain", "--untracked-files=all",
-                  "--ignore-submodules=none"]).isEmpty else { return false }
-        let head = try await git(owner.worktreePath, ["rev-parse", "HEAD"])
-        guard !head.isEmpty else { return false }
-        return try await git(owner.repositoryPath, ["merge-base", head, base]) == head
-    }
-
-    private func simulatorReason(_ record: ArtifactSimulator, device: Device) async throws -> String? {
-        guard !record.owners.isEmpty else { return nil }
-        if try record.owners.allSatisfy({ try !worktreeExists($0) }) { return "missing-worktree" }
-        // A device still booted is in current use, regardless of how old its
-        // boot timestamp is. Only independently obsolete owners qualify it.
-        if device.state == "Shutdown", let lastUse = lastUse(record, device), lastUse < now().timeIntervalSince1970 - Self.simulatorRetention {
-            return "unused-over-1-day"
-        }
-        // No fetch/prune or GitHub requests. Missing refs, detached HEAD,
-        // dirty/unmerged owners and uncertain Git results never establish a merge.
-        for owner in record.owners where try worktreeExists(owner) {
-            guard (try? await mergedOwner(owner, simulatorName: record.name)) == true else { return nil }
-        }
-        return "merged-into-cached-origin-default"
-    }
-
     struct ExternalUsage {
         struct OpenFile { let pid: Int?; let path: String }
         let buildRunning: Bool
@@ -444,103 +399,6 @@ public struct ArtifactCleanup: Sendable {
             else if line.hasPrefix("n") { files.append(.init(pid: pid, path: String(line.dropFirst()))) }
         }
         return ExternalUsage(buildRunning: false, processes: processes, files: files, simulatorSessions: sessions, consoleTargets: consoleTargets)
-    }
-
-    private func cleanSimulators(settings: Settings, apply: Bool, report: inout CleanupReport) async throws {
-        let records = try store.all(ArtifactSimulator.self, in: "simulators")
-        guard !records.isEmpty else { return }
-        let inventory = try await deviceList()
-        let usage = try await externalUsage()
-        for entry in records {
-            var current: Device?
-            var deletionRequested = false
-            var deletionConfirmed = false
-            var shutdownRequested = false
-            var shutdownConfirmed = false
-            func action(_ reason: String, _ outcome: String) -> CleanupReport.Action {
-                .init(target: entry.udid, reason: reason, outcome: outcome, name: entry.name,
-                      lastUsedAt: current.flatMap { lastUse(entry, $0) }
-                        .map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) },
-                      estimatedBytes: current?.dataPathSize, state: current?.state,
-                      requiresShutdown: current.map { $0.state == "Booted" })
-            }
-            do {
-                guard UUID(uuidString: entry.udid) != nil, !ArtifactStore.isStandardSimulator(entry.name),
-                      !entry.owners.contains(where: { excluded($0, settings: settings) }),
-                      let initial = inventory.first(where: { $0.udid == entry.udid }), initial.name == entry.name else { continue }
-                current = initial
-                guard ["Shutdown", "Booted"].contains(initial.state) else {
-                    report.actions.append(action("transitioning-or-unknown-state", "preserved")); continue
-                }
-                var leases: [ArtifactLease] = []
-                defer { leases.forEach { $0.close() } }
-                let paths = Set(entry.owners.map { store.projectLock($0.projectPath) }).sorted { $0.path < $1.path }
-                for path in paths {
-                    guard let lease = try ArtifactLease.tryAcquire(path) else { break }
-                    leases.append(lease)
-                }
-                guard leases.count == paths.count,
-                      let deviceLease = try ArtifactLease.tryAcquire(store.simulatorLock(entry.udid)) else {
-                    report.actions.append(action("active-build-or-install", "preserved")); continue
-                }
-                defer { deviceLease.close() }
-                guard let record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(entry.udid)),
-                      record.owners == entry.owners, record.name == entry.name,
-                      let device = try await (apply ? deviceList() : inventory).first(where: { $0.udid == entry.udid }), device.name == record.name else { continue }
-                current = device
-                guard device.state == initial.state, lastUse(record, device) == lastUse(record, initial) else {
-                    report.actions.append(action("usage-changed", "preserved")); continue
-                }
-                guard let reason = try await simulatorReason(record, device: device) else {
-                    report.actions.append(action(device.state == "Booted" ? "booted-with-live-unmerged-owner" :
-                        (lastUse(record, device) == nil ? "unknown-last-use" : "recent-or-unmerged"), "preserved")); continue
-                }
-                guard !usage.usesSimulator(device, root: devices, owners: record.owners) else {
-                    report.actions.append(action("external-use", "preserved")); continue
-                }
-                if apply {
-                    guard try await !externalUsage().usesSimulator(device, root: devices, owners: record.owners),
-                          let fresh = try await deviceList().first(where: { $0.udid == device.udid }),
-                          fresh.state == device.state, fresh.name == record.name,
-                          lastUse(record, fresh) == lastUse(record, device),
-                          try await simulatorReason(record, device: fresh) == reason else {
-                        report.actions.append(action("usage-changed", "preserved")); continue
-                    }
-                    if fresh.state == "Booted" {
-                        shutdownRequested = true
-                        _ = try await simctl(["shutdown", fresh.udid])
-                        guard let stopped = try await deviceList().first(where: { $0.udid == fresh.udid }),
-                              stopped.state == "Shutdown", stopped.name == record.name else {
-                            throw OrchardError.message("Shutdown is not confirmed; not retrying")
-                        }
-                        shutdownConfirmed = true
-                        // Shutdown updates lastUsedAt. Ownership/merge evidence
-                        // must still qualify; newly started use cancels deletion.
-                        guard try await !externalUsage().usesSimulator(stopped, root: devices, owners: record.owners),
-                              let final = try await deviceList().first(where: { $0.udid == stopped.udid }),
-                              final.state == "Shutdown", final.name == record.name,
-                              lastUse(record, final) == lastUse(record, stopped),
-                              try await simulatorReason(record, device: final) == reason else {
-                            report.actions.append(action("usage-changed-after-shutdown", "stopped-preserved")); continue
-                        }
-                    }
-                    deletionRequested = true
-                    _ = try await simctl(["delete", device.udid])
-                    guard try await !deviceList().contains(where: { $0.udid == device.udid }) else {
-                        throw OrchardError.message("Deletion is not confirmed; not retrying")
-                    }
-                    deletionConfirmed = true
-                    try FileManager.default.removeItem(at: store.simulatorURL(record.udid))
-                }
-                report.actions.append(action(reason, apply ? "removed" : "would-remove"))
-            } catch {
-                if current != nil {
-                    report.actions.append(action(String(describing: error),
-                        deletionConfirmed ? "removed" : (deletionRequested ? "unconfirmed" :
-                            (shutdownConfirmed ? "stopped-preserved" : (shutdownRequested ? "shutdown-unconfirmed" : "preserved")))))
-                }
-            }
-        }
     }
 
     private func cleanSourcePackages(owners: [ArtifactProject], settings: Settings, apply: Bool,
