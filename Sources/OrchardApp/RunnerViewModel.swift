@@ -935,7 +935,18 @@ final class RunnerViewModel: ObservableObject {
         }
     }
 
-    private func startRunReplacingDestination(_ request: RunRequest) async {
+    private func startRunReplacingDestination(_ original: RunRequest) async {
+        let request: RunRequest
+        do {
+            let destination = try await SimulatorBaseService().prepareManagedDestination(original.destination, project: original.project)
+            request = RunRequest(replacingJobID: original.replacingJobID, worktreeDisplayName: original.worktreeDisplayName,
+                branchName: original.branchName, project: original.project, scheme: original.scheme, destination: destination)
+            if selectedDestinationID == original.destination.id { selectedDestinationID = destination.id }
+        } catch {
+            status = String(describing: error)
+            appendAppLog("Simulator preparation: \(error)\n")
+            return
+        }
         let replacingJobID = request.replacingJobID
         let destinationID = request.destination.id
 

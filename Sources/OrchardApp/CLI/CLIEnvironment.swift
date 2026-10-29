@@ -135,7 +135,8 @@ final class CLIEnvironment: @unchecked Sendable {
             in: destinationList
         ).get()
 
-        return (worktree, resolvedScheme, resolvedDestination)
+        let current = try await SimulatorBaseService().prepareManagedDestination(resolvedDestination, project: worktree.project)
+        return (worktree, resolvedScheme, current)
     }
 
     /// Default run path: hand a resolved request to the GUI app, which runs it

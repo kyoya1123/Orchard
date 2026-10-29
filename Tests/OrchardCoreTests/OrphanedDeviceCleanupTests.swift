@@ -26,7 +26,7 @@ final class OrphanedDeviceCleanupTests: XCTestCase, @unchecked Sendable {
                 worktreePath: root.path, repositoryPath: root.path))
         }
         let id = UUID().uuidString
-        try store.write(ArtifactSimulator(udid: id, name: "feature-example", owners: owners, lastUsedAt: 200), to: store.simulatorURL(id))
+        try store.write(ArtifactSimulator(udid: id, name: "feature-example", owners: owners, lastUsedAt: Date().timeIntervalSince1970), to: store.simulatorURL(id))
         let commands = CleanupCommands()
         await commands.add(id, name: "feature-example", state: "Booted", date: Date(timeIntervalSince1970: 200))
         let worker = OrphanedDeviceCleanup(store: store, devices: root.appendingPathComponent("Devices"),
@@ -96,5 +96,49 @@ final class OrphanedDeviceCleanupTests: XCTestCase, @unchecked Sendable {
         let file = root.appendingPathComponent("file")
         try Data().write(to: file)
         XCTAssertThrowsError(try MissingWorktree.check(file.appendingPathComponent("child").path))
+    }
+
+    func testOldBootedDeviceUsesMeaningfulUseNotInventoryAndRechecksBeforeDelete() async throws {
+        for refresh in [false, true] {
+            let f = try await fixture(existing: true)
+            var record = try XCTUnwrap(f.store.read(ArtifactSimulator.self, at: f.store.simulatorURL(f.id)))
+            record.lastUsedAt = Date().timeIntervalSince1970 - 86401
+            try f.store.write(record, to: f.store.simulatorURL(f.id))
+            let worker = OrphanedDeviceCleanup(store: f.store, devices: f.worker.devices, home: f.root, environment: [:]) { tool, args in
+                let result = try await f.commands.run(tool, args)
+                if refresh && args.contains("shutdown") {
+                    var fresh = try XCTUnwrap(f.store.read(ArtifactSimulator.self, at: f.store.simulatorURL(f.id)))
+                    fresh.lastUsedAt = Date().timeIntervalSince1970
+                    try f.store.write(fresh, to: f.store.simulatorURL(f.id))
+                }
+                return result
+            }
+            let preview = await worker.run(apply: false)
+            XCTAssertEqual(preview.actions.first?.reason, "unused-over-24-hours")
+            XCTAssertEqual(try f.store.read(ArtifactSimulator.self, at: f.store.simulatorURL(f.id))?.lastUsedAt, record.lastUsedAt)
+            let result = await worker.run(apply: true)
+            XCTAssertEqual(result.actions.first?.outcome, refresh ? "stopped-preserved" : "removed")
+        }
+    }
+
+    func testOngoingActivityProtectsMissingOwnerThenFinishingRefreshesUse() async throws {
+        let f = try await fixture()
+        let lease = try XCTUnwrap(ArtifactLease.tryAcquire(f.store.simulatorLock(f.id), shared: true))
+        let activity = try DeviceActivity(store: f.store, device: f.id, lease: lease)
+        let busy = await f.worker.run(apply: true)
+        XCTAssertEqual(busy.actions.first?.reason, "active-build-or-install")
+        try FileManager.default.createDirectory(atPath: f.owner.worktreePath, withIntermediateDirectories: true)
+        activity.finish()
+        let date = try XCTUnwrap(DeviceActivity.latest(store: f.store, device: f.id))
+        XCTAssertLessThan(abs(Date().timeIntervalSince1970 - date), 2)
+        let finished = await f.worker.run(apply: true)
+        XCTAssertEqual(finished.actions.first?.outcome, "preserved")
+    }
+
+    func testInaccessibleCoOwnerPreservedEvenWhenOld() async throws {
+        let f = try await fixture(shared: true)
+        let worker = OrphanedDeviceCleanup(store: f.store, devices: f.worker.devices, home: f.root, environment: [:],
+            isMissing: { path in if path == "/unreadable" { throw POSIXError(.EACCES) }; return false }) { _, _ in "" }
+        XCTAssertThrowsError(try worker.eligibility([f.root.path, "/unreadable"], lastUsedAt: 1))
     }
 }

@@ -42,9 +42,10 @@ struct SimulatorCatalog: Decodable, Sendable {
     let runtimes: [Runtime]
     let devices: [String: [Device]]
 
-    func resolve(_ selection: SimulatorSelection) throws -> (DeviceType, Runtime) {
+    func resolve(_ selection: SimulatorSelection, minimumRuntime: String? = nil) throws -> (DeviceType, Runtime) {
         let runtimes = runtimes.filter {
             $0.isAvailable && $0.identifier.contains(".iOS-") &&
+            (minimumRuntime == nil || !Self.numbers($0.version).prefix(2).lexicographicallyPrecedes(Self.numbers(minimumRuntime!).prefix(2))) &&
             (selection.runtime == "latest" || selection.runtime == $0.name || selection.runtime == $0.identifier)
         }.sorted {
             if $0.version != $1.version { return Self.numbers($1.version).lexicographicallyPrecedes(Self.numbers($0.version)) }
@@ -80,6 +81,7 @@ struct SimulatorCatalog: Decodable, Sendable {
                 }).first { return (device, runtime) }
             }
         }
+        if let minimumRuntime { throw OrchardError.message("Runtime migration pending: install an available iOS \(minimumRuntime) or newer Simulator runtime for the selected Simulator SDK. Existing devices have been preserved; no fallback was launched.") }
         throw OrchardError.message("No installed, available iOS Simulator configuration matches \(selection.deviceType) / \(selection.runtime).")
     }
 

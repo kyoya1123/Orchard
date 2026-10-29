@@ -54,7 +54,9 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 
 Orchard checks positively associated worktree devices at app startup/reopen, on GUI runs, and on each `run`, `list`, `runs`, or `simulator` CLI invocation. Help and cleanup previews never schedule deletion. Automatic checks use only the `orphaned-devices` scope and existing ownership records, in a coalesced background worker with bounded lock/retry waits. Failed requests remain pending for the next invocation.
 
-A device qualifies only when **every associated worktree path is confirmed missing**. Existing worktrees are preserved regardless of age, branch merge status or Claude/Codex archive state. Unknown ownership, inaccessible paths, broken links, renamed devices and ambiguous device identity are preserved. No session databases, conversation files or process listings are read for device cleanup. iOS ownership comes from Orchard's recorded UDID/project association; Android uses a validated AVD registration and launch receipt.
+A positively associated device qualifies when **every owner worktree is missing, or its last meaningful use is over 24 hours ago**. Branches keep separate devices. Orchard build/install/launch activity refreshes usage; a booted idle device, console output, and cleanup enumeration do not. Existing iOS registry usage dates are retained as conservative legacy usage evidence (older versions also imported run-update dates); Android uses the modification time of its validated emulator launch receipt. No creation time or migration-time reset is used. Unknown ownership/usage, inaccessible paths, broken links, renamed devices and ambiguous identity are preserved. No session databases, conversations or process listings are inspected.
+
+Orchard's builds hold device/project leases through installation and refresh usage on completion. Wrap external foreground iOS tests or Android build/install/test commands with `orchard device-use --simulator UDID -- xcodebuild ... test` or `orchard device-use --avd NAME -- ./gradlew ...`; the exact target remains protected until the command finishes. The wrapper has a bounded timeout (default 2 hours, maximum 24 hours). External work that does not use this wrapper cannot be inferred from process lists.
 
 Eligible booted iOS Simulators are individually shut down and deleted with `simctl`; Android emulators are stopped with their exact ADB serial and removed with `avdmanager`. The worktree path, ownership and device identity are checked again before removal. Failed or unconfirmed shutdown never proceeds to deletion. Other devices, worktrees, branches and source files remain untouched. Deleting a device removes the apps and data stored inside it.
 
@@ -63,11 +65,17 @@ orchard cleanup --scope orphaned-devices --no-discover --json
 orchard cleanup --scope orphaned-devices --no-discover --apply --json
 ```
 
-`archived-devices` remains a compatibility alias for `orphaned-devices`; it no longer reads archive metadata. `simulators` applies the same missing-worktree rule to iOS only. Explicit `derived-data` and `source-packages` scopes keep their existing cache policies; automatic checks never collect those caches. The default explicit scope is `all`.
+`archived-devices` remains a compatibility alias for `orphaned-devices`; it no longer reads archive metadata. `simulators` applies the same 24-hour/missing-worktree rule to iOS only. Explicit `derived-data` and `source-packages` scopes keep their existing cache policies; automatic checks never collect those caches. The default explicit scope is `all`.
 
 Reports include exact device IDs/names, observed state, shutdown requirements and removal/preservation reasons. Inspection never stops or removes a device but may update report/lock metadata. Ownership, `last-report.json`, and pending/completed invocation receipts live under `~/Library/Application Support/Orchard/Cleanup-v1/`. Exclude project paths with `settings.json` containing `{"excludedPaths":["/absolute/path/to/project"]}`. Failed automatic requests are recorded in `invocation-error.json`, cleared after a successful pass. `ORCHARD_DISABLE_BACKGROUND_CLEANUP=1` disables automatic workers in tests.
 
 No cron or LaunchAgent is installed. Go/Gradle/npm caches, DeviceSupport, Simulator runtimes and source worktrees are outside automatic device cleanup.
+
+### Xcode and runtime upgrades
+
+The selected Xcode's **Simulator SDK** determines the minimum runtime version, independently of the Xcode application version. If a matching or newer installed runtime is unavailable, preparation reports `Runtime migration pending`; no old destination is silently launched and no runtime migration deletes devices. Orchard never downloads or uninstalls runtime packages.
+
+Every invocation checks the base generation (runtime identifier/build, Xcode version/build, selected simctl path and format revision). Once a new base has booted, passed validation and shut down, obsolete Orchard-owned clones are individually stopped and deleted; active build/test leases and unknown/changed devices remain protected. The manifest records each managed clone's generation. GUI launches/reruns and explicit CLI destinations prepare their managed destination again, replacing stale saved UDIDs. Per-branch devices are recreated on demand. Migration status is in the cleanup report; exact migration removals are in `SimulatorBases-v1/last-migration.json`.
 
 ## Requirements
 

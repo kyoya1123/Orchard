@@ -29,6 +29,9 @@ enum MissingWorktree {
                 throw OrchardError.message("Worktree path is linked or not a directory: \(current)")
             }
         }
+        guard access(path, R_OK | X_OK) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EACCES)
+        }
         return false
     }
 }

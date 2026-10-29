@@ -89,7 +89,7 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         let cloneIndex = try XCTUnwrap(calls.lastIndex { $0.contains("clone") })
         XCTAssertGreaterThan(deleteIndex, cloneIndex)
         let branches = await fake.defaultDevices
-        XCTAssertEqual(branches.count, 2)
+        XCTAssertEqual(branches.count, 1)
     }
 
     func testRuntimeBuildUpdateAlsoInvalidatesBase() async throws {
@@ -127,7 +127,7 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(calls.contains { $0.contains("delete") })
     }
 
-    func testBootedOldBaseIsNotStoppedOrDeleted() async throws {
+    func testBootedOldEmptyBaseIsStoppedAndDeletedAfterReplacement() async throws {
         let (service, fake, _) = try fixture()
         let first = try await service.prepare()
         await fake.setState(first.udid, "Booted")
@@ -135,7 +135,8 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         let second = try await service.prepare()
         XCTAssertNotEqual(first.udid, second.udid)
         let calls = await fake.calls
-        XCTAssertFalse(calls.contains { ($0.contains("shutdown") || $0.contains("delete")) && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("shutdown") && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.udid) })
     }
 
     func testBaseWithUserAppIsNeitherClonedNorDeleted() async throws {
@@ -191,6 +192,43 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(calls.filter { $0.contains("clone") }.count, 1)
     }
 
+    func testMissingSDKRuntimeLeavesOldBaseAndBranchAndFailsWithoutFallback() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "branch")
+        await fake.setSDK("27.2")
+        await fake.resetCalls()
+        do { _ = try await service.prepare(name: "branch"); XCTFail("Must wait for 27.2") }
+        catch { XCTAssertTrue(String(describing: error).contains("migration pending")) }
+        let calls = await fake.calls
+        XCTAssertFalse(calls.contains { $0.contains("create") || $0.contains("delete") || $0.contains("clone") })
+        let devices = await fake.defaultDevices
+        XCTAssertTrue(devices.contains { $0["udid"] == first.udid })
+    }
+
+    func testSameBranchRecreatedOnGenerationChangeAndBootedOldCloneRemoved() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "branch")
+        await fake.setState(first.udid, "Booted")
+        await fake.setRuntimeBuild("24A999")
+        let replacement = try await service.prepare(name: "branch")
+        XCTAssertNotEqual(replacement.udid, first.udid)
+        XCTAssertFalse(replacement.reused)
+        let calls = await fake.calls
+        XCTAssertTrue(calls.contains { $0.contains("shutdown") && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.udid) })
+        let third = try await service.prepare(name: "branch")
+        XCTAssertEqual(third.udid, replacement.udid)
+    }
+
+    func testRuntimeNumericSelectionAndRequiredSDK() throws {
+        let catalog = SimulatorCatalog(devicetypes: [.init(identifier: "phone", name: "iPhone 18 Pro", productFamily: nil,
+            modelIdentifier: "iPhone19,2", minRuntimeVersion: nil, maxRuntimeVersion: nil)],
+            runtimes: ["27.0.1", "27.1", "27.2"].map { .init(identifier: "com.apple.iOS-" + $0,
+                name: "iOS " + $0, version: $0, buildversion: $0, isAvailable: true, supportedDeviceTypes: nil) }, devices: [:])
+        XCTAssertEqual(try catalog.resolve(.init(), minimumRuntime: "27.2").1.version, "27.2")
+        XCTAssertThrowsError(try catalog.resolve(.init(runtime: "iOS 27.1"), minimumRuntime: "27.2"))
+    }
+
     func testCorruptRegistryFailsClosed() async throws {
         let (service, fake, root) = try fixture()
         try Data("not json".utf8).write(to: root.appendingPathComponent("manifest.json"))
@@ -206,6 +244,7 @@ private actor SimulatorFixture {
     var defaultDevices: [[String: String]] = []
     var xcode = "Xcode 27.0 build 27A266a"
     var runtimeBuild = "24A434"
+    var sdk = "27.0"
     var failure: String?
     var userApps: Set<String> = []
     var privateSet: String?
@@ -213,6 +252,7 @@ private actor SimulatorFixture {
 
     func deleteBranchesAfterNextCatalog() { deleteAfterCatalog = true }
 
+    func setSDK(_ value: String) { sdk = value }
     func setXcode(_ value: String) { xcode = value }
     func setRuntimeBuild(_ value: String) { runtimeBuild = value }
     func setFailure(_ value: String) { failure = value }
@@ -225,6 +265,7 @@ private actor SimulatorFixture {
     }
     func setState(_ id: String, _ state: String) {
         if let i = privateDevices.firstIndex(where: { $0["udid"] == id }) { privateDevices[i]["state"] = state }
+        if let i = defaultDevices.firstIndex(where: { $0["udid"] == id }) { defaultDevices[i]["state"] = state }
     }
     func rename(_ id: String, _ name: String) {
         if let i = privateDevices.firstIndex(where: { $0["udid"] == id }) { privateDevices[i]["name"] = name }
@@ -270,6 +311,7 @@ private actor SimulatorFixture {
             if deleteAfterCatalog { defaultDevices = []; deleteAfterCatalog = false }
             return xcode
         }
+        if tool == "--sdk" { return sdk }
         if tool == "--find" { return "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl" }
         guard tool == "simctl", arguments.count >= 3, arguments[0] == "--set" else {
             throw OrchardError.message("Unexpected command")
@@ -303,8 +345,8 @@ private actor SimulatorFixture {
             defaultDevices.append(new)
             return new["udid"]!
         case "delete":
-            guard arguments[1].hasSuffix("/devices") else { throw OrchardError.message("Tried to delete default device!") }
-            privateDevices.removeAll { $0["udid"] == args[1] }
+            if arguments[1].hasSuffix("/devices") { privateDevices.removeAll { $0["udid"] == args[1] } }
+            else { defaultDevices.removeAll { $0["udid"] == args[1] } }
         default: throw OrchardError.message("Unexpected command \(args)")
         }
         return ""

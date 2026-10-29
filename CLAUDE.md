@@ -193,7 +193,7 @@ open Orchard.app
 
 ## Simulator base ownership
 
-- `SimulatorBaseService` exclusively owns the private `SimulatorBases-v1/devices` device set and its manifest. Default-set branch Simulators are never cleaned up here.
+- `SimulatorBaseService` exclusively owns the private `SimulatorBases-v1/devices` device set and its manifest. Registered default-set clones are migrated only after the replacement base has passed initialization; unknown devices are preserved.
 - `simulator base`, `simulator ensure`, and `run --branch-simulator` share the same process lock and service. `Scripts/ios-run.sh` delegates creation to that service.
 - A base has system apps only and is initialized by boot/bootstatus/shutdown. Do not install user apps, apply SimSlim, or run it as a build destination.
 - Replacement must finish initialization and any requested clone before pruning an older registered base. Recheck identity, Shutdown state and installed apps before deletion. Unknown, busy or modified devices are preserved.
@@ -202,8 +202,11 @@ open Orchard.app
 ## Background artifact collection
 
 - Automatic invocation cleanup uses `orphaned-devices` and existing ownership records only. `archived-devices` is a compatibility alias. Never inspect agent sessions, archive state, merge status or process lists for device eligibility.
-- A positively associated device qualifies only if every owning worktree is confirmed missing. Preserve existing, inaccessible or unknown paths and broken links. Recheck paths, ownership and device identity before targeted shutdown/deletion. Running state alone does not preserve an orphan; unconfirmed shutdown or concurrent changes do.
+- A positively associated device qualifies if all owning worktrees are missing OR meaningful use is older than 24 hours. Preserve inaccessible/unknown paths and broken links, and unknown usage when an owner exists. Recheck paths, ownership and device identity before targeted shutdown/deletion. Use shared DeviceActivity leases through build/install/test, and refresh at completion. Console attachment and inventory never refresh usage. Running state alone does not preserve an eligible device; unconfirmed shutdown or concurrent changes do.
 - iOS uses recorded UDID/project ownership and targeted simctl operations. Android validates its registration and launch receipt, resolves the exact ADB serial, stops that emulator, then uses avdmanager to remove it.
 - Durable invocation requests are coalesced; lock/retry/subprocess waits are bounded. Errors retain the pending request. Help, preview and the worker do not recursively schedule cleanup.
 - Explicit DerivedData/SourcePackages cleanup retains its existing policy and protections. Automatic device cleanup never touches unrelated caches, runtimes, branches or worktrees.
 - Test with injected paths and mock commands; `ORCHARD_DISABLE_BACKGROUND_CLEANUP=1` disables worker launches. CoreSimulator client subprocesses use utility QoS while background filesystem work stays throttled. Never run filesystem collection on MainActor.
+
+- Simulator runtime migration requires an available runtime at least as new as the selected Simulator SDK. Missing runtimes are pending, never a fallback. Base/clone generation includes runtime build, Xcode build and simctl path; only after replacement initialization are old managed clones removed. GUI/CLI saved managed destinations must go through `prepareManagedDestination`. Do not download runtimes automatically.
+- Android external build/install/test work and external iOS tests use `device-use` to hold bounded device activity leases. No process-based inference is permitted.

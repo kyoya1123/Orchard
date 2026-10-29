@@ -40,6 +40,8 @@ struct ArtifactStore: Sendable {
     func projectLock(_ project: String) -> URL { root.appendingPathComponent("locks/project-\(Self.key(project)).lock") }
     func simulatorLock(_ udid: String) -> URL { root.appendingPathComponent("locks/simulator-\(Self.key(udid)).lock") }
 
+    func avdLock(_ path: String) -> URL { root.appendingPathComponent("locks/avd-\(Self.key(path)).lock") }
+
     static func key(_ path: String) -> String {
         SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -115,6 +117,7 @@ public final class ArtifactActivity: @unchecked Sendable {
     let owner: ArtifactOwner
     private let store: ArtifactStore
     private var leases: [ArtifactLease]
+    private var deviceActivities: [DeviceActivity] = []
 
     private init(owner: ArtifactOwner, store: ArtifactStore, lease: ArtifactLease) {
         self.owner = owner
@@ -127,7 +130,7 @@ public final class ArtifactActivity: @unchecked Sendable {
         // enrolled in automatic deletion.
         guard let owner = try? await ArtifactOwner.resolve(project) else { return nil }
         let store = ArtifactStore()
-        let lease = try await ArtifactLease.acquire(store.projectLock(owner.projectPath))
+        let lease = try await ArtifactLease.acquire(store.projectLock(owner.projectPath), timeout: .seconds(10))
         let activity = ArtifactActivity(owner: owner, store: store, lease: lease)
         try store.write(ArtifactProject(owner: owner, lastUsedAt: Date().timeIntervalSince1970),
                         to: store.projectURL(owner.projectPath))
@@ -140,8 +143,9 @@ public final class ArtifactActivity: @unchecked Sendable {
 
     public func useSimulator(udid: String, name: String) async throws {
         guard UUID(uuidString: udid) != nil, !ArtifactStore.isStandardSimulator(name) else { return }
-        leases.append(try await ArtifactLease.acquire(store.simulatorLock(udid)))
-        let update = try await ArtifactLease.acquire(store.root.appendingPathComponent("registry.lock"), shared: false)
+        let lease = try await ArtifactLease.acquire(store.simulatorLock(udid), timeout: .seconds(5))
+        deviceActivities.append(try DeviceActivity(store: store, device: udid, lease: lease))
+        let update = try await ArtifactLease.acquire(store.root.appendingPathComponent("registry.lock"), shared: false, timeout: .seconds(5))
         defer { update.close() }
         var record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(udid))
             ?? ArtifactSimulator(udid: udid, name: name, owners: [], lastUsedAt: 0)
@@ -157,6 +161,8 @@ public final class ArtifactActivity: @unchecked Sendable {
         guard !leases.isEmpty else { return }
         try? store.write(ArtifactProject(owner: owner, lastUsedAt: Date().timeIntervalSince1970),
                          to: store.projectURL(owner.projectPath))
+        for activity in deviceActivities { activity.finish() }
+        deviceActivities.removeAll()
         for lease in leases { lease.close() }
         leases.removeAll()
         BackgroundCleanup.schedule()

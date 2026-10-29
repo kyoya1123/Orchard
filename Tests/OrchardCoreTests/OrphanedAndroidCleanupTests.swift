@@ -110,6 +110,24 @@ final class OrphanedAndroidCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.avd.path))
     }
 
+    func testOldLaunchReceiptExpiresAndActivityProtectsUntilFinished() async throws {
+        for active in [false, true] {
+            let f = try fixture(existing: true)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -86401)],
+                ofItemAtPath: f.avd.appendingPathComponent("emu-launch-params.txt").path)
+            var activity: DeviceActivity?
+            if active {
+                let lease = try XCTUnwrap(ArtifactLease.tryAcquire(f.worker.store.avdLock(f.avd.path), shared: true))
+                activity = try DeviceActivity(store: f.worker.store, device: f.avd.path, lease: lease,
+                    now: { Date(timeIntervalSinceNow: -90000) })
+            }
+            let result = await f.worker.run(apply: true)
+            XCTAssertEqual(result.actions.first?.outcome, active ? "preserved" : "removed")
+            XCTAssertEqual(result.actions.first?.reason, active ? "active-build-or-install" : "unused-over-24-hours")
+            activity?.finish()
+        }
+    }
+
     func testMissingLaunchSubdirectoryDoesNotRemoveExistingRecordedWorktreeDevice() async throws {
         let f = try fixture()
         let owner = ArtifactOwner(projectPath: f.root.appendingPathComponent("App.xcodeproj").path,
@@ -140,7 +158,7 @@ actor AndroidCleanupCommands {
                 return "List of devices attached\n" + running.keys.sorted().map { "\($0)\tdevice\n" }.joined()
             }
             if args.count == 5, args[0] == "-s", Array(args.suffix(3)) == ["emu", "avd", "name"], let name = running[args[1]] {
-                return name + "\nOK\n"
+                return name + "\r\nOK\r\n"
             }
             if args == ["-s", "emulator-5554", "emu", "kill"] {
                 mutations.append("kill:emulator-5554")

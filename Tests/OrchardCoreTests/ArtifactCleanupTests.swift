@@ -98,7 +98,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "missing-worktree" && $0.outcome == "removed" })
     }
 
-    func testExistingWorktreeSevenDayBoundaryAndSourceArePreserved() async throws {
+    func testCacheBoundaryAndSourcePreservedWhileUnusedDeviceExpires() async throws {
         let f = try fixture()
         let expired = try cache(f, name: "App-expired", age: ArtifactCleanup.retention)
         let recent = try cache(f, name: "App-recent", age: ArtifactCleanup.retention - 1)
@@ -107,14 +107,18 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(report.error)
         XCTAssertFalse(FileManager.default.fileExists(atPath: expired.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path))
-        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "preserved" })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
         XCTAssertEqual(try String(contentsOfFile: f.owner.worktreePath + "/Source.swift", encoding: .utf8), "uncommitted source")
     }
 
-    func testRecentSimulatorActivityOverridesOldRecordAndLatestBuildLogWins() async throws {
+    func testRecentMeaningfulActivityOverridesOldRecordAndLatestBuildLogWins() async throws {
         let f = try fixture()
         let id = try await simulator(f, age: 8 * 86400)
         await f.commands.add(id, name: "feature-example", state: "Booted", date: clock)
+        let date = clock
+        let lease = try XCTUnwrap(ArtifactLease.tryAcquire(f.store.simulatorLock(id), shared: true))
+        let activity = try DeviceActivity(store: f.store, device: id, lease: lease, now: { date })
+        activity.finish()
         let dd = try cache(f, age: 8 * 86400)
         let logs = dd.appendingPathComponent("Logs/Build")
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
@@ -294,15 +298,15 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let recent = try await simulator(f, age: 86400 - 1)
         let dd = try cache(f, age: 9 * 86400)
         let preview = await f.worker.run(apply: false, discover: false, scope: .simulators)
-        XCTAssertTrue(preview.actions.allSatisfy { $0.outcome == "preserved" })
+        XCTAssertTrue(preview.actions.contains { $0.target == old && $0.outcome == "would-remove" })
         let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-        XCTAssertTrue(report.actions.contains { $0.target == old && $0.outcome == "preserved" })
+        XCTAssertTrue(report.actions.contains { $0.target == old && $0.outcome == "removed" })
         XCTAssertTrue(report.actions.contains { $0.target == boundary && $0.outcome == "preserved" })
         XCTAssertTrue(report.actions.contains { $0.target == recent && $0.outcome == "preserved" })
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
     }
 
-    func testUnknownUsageAndRecentCoreSimulatorBootArePreserved() async throws {
+    func testUnknownUsageIsPreservedAndBootDoesNotRefreshMeaningfulUse() async throws {
         let f = try fixture()
         let unknown = try await simulator(f)
         try f.store.write(ArtifactSimulator(udid: unknown, name: "feature-example", owners: [f.owner], lastUsedAt: 0),
@@ -311,20 +315,20 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let recent = try await simulator(f, age: 9 * 86400)
         await f.commands.setDates(recent, used: nil, booted: ISO8601DateFormatter().string(from: clock))
         let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-        XCTAssertTrue(report.actions.contains { $0.target == unknown && $0.reason == "worktree-exists-or-ownership-unknown" })
-        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
+        XCTAssertTrue(report.actions.contains { $0.target == unknown && $0.outcome == "preserved" })
+        XCTAssertTrue(report.actions.contains { $0.target == recent && $0.outcome == "removed" })
     }
 
-    func testExternalWorktreeProcessAndExternalBuildProtectOldSimulator() async throws {
+    func testUnusedDeviceDoesNotInspectExternalProcesses() async throws {
         for externalBuild in [true, false] {
             let f = try fixture()
             _ = try await simulator(f, age: 3 * 86400)
             if externalBuild { await f.commands.setBusy(external: true) }
             else { await f.commands.setOpenPath(f.owner.worktreePath) }
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            XCTAssertTrue(report.actions.contains { $0.reason == "worktree-exists-or-ownership-unknown" && $0.outcome == "preserved" })
+            XCTAssertTrue(report.actions.contains { $0.reason == "unused-over-24-hours" && $0.outcome == "removed" })
             let calls = await f.commands.verbs
-            XCTAssertFalse(calls.contains("delete"))
+            XCTAssertTrue(calls.contains("delete"))
         }
     }
 
@@ -340,16 +344,16 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
       }
     }
 
-    func testBootedAgeAloneAndTransitionalStateNeverQualify() async throws {
+    func testBootedUnusedDeviceQualifiesButTransitionalStateDoesNot() async throws {
         for state in ["Booted", "Booting", "Shutting Down", "Unknown"] {
             let f = try fixture(existing: state == "Booted")
             _ = try await simulator(f, state: state, age: 10 * 86400)
             let result = await f.worker.run(apply: true, discover: false, scope: .simulators)
-            XCTAssertEqual(result.actions.first?.outcome, "preserved", state)
-            XCTAssertEqual(result.actions.first?.reason, state == "Booted" ? "worktree-exists-or-ownership-unknown" : "transitioning-device")
+            XCTAssertEqual(result.actions.first?.outcome, state == "Booted" ? "removed" : "preserved", state)
+            XCTAssertEqual(result.actions.first?.reason, state == "Booted" ? "unused-over-24-hours" : "transitioning-device")
             let calls = await f.commands.verbs
-            XCTAssertFalse(calls.contains("shutdown"))
-            XCTAssertFalse(calls.contains("delete"))
+            XCTAssertEqual(calls.contains("shutdown"), state == "Booted")
+            XCTAssertEqual(calls.contains("delete"), state == "Booted")
         }
     }
 

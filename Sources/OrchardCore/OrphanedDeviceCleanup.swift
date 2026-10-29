@@ -1,7 +1,7 @@
 import Foundation
 
-/// Removes positively associated devices only when every owning worktree is missing.
-/// No session metadata, process inspection, age, or merge inference. Called under cleanup.lock.
+/// Removes positively associated devices with missing owners or 24 hours without meaningful use.
+/// No session metadata, process inspection, or merge inference. Called under cleanup.lock.
 struct OrphanedDeviceCleanup: Sendable {
     typealias Command = ArtifactCleanup.Command
     let store: ArtifactStore
@@ -11,14 +11,18 @@ struct OrphanedDeviceCleanup: Sendable {
     let sdk: URL
     let java: String?
     let command: Command
+    let now: @Sendable () -> Date
+    static let unusedRetention: Double = 24 * 3600
     let shutdownTimeout: Duration
     let shutdownPollInterval: Duration
 
     init(store: ArtifactStore, devices: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser,
          environment: [String: String] = ProcessInfo.processInfo.environment,
          shutdownTimeout: Duration = .seconds(5), shutdownPollInterval: Duration = .milliseconds(250),
+         now: @escaping @Sendable () -> Date = { Date() },
          isMissing: @escaping @Sendable (String) throws -> Bool = MissingWorktree.check,
          command: @escaping Command) {
+        self.now = now
         self.store = store
         self.devices = devices
         self.isMissing = isMissing
@@ -51,9 +55,19 @@ struct OrphanedDeviceCleanup: Sendable {
         return report
     }
 
-    func allMissing(_ paths: Set<String>) throws -> Bool {
-        guard !paths.isEmpty else { return false }
-        return try paths.allSatisfy { try isMissing($0) }
+    func eligibility(_ paths: Set<String>, lastUsedAt: Double?) throws -> String? {
+        guard !paths.isEmpty else { return nil }
+        // Inspect ALL paths first: an inaccessible co-owner must also prevent TTL deletion.
+        let missing = try paths.map { try isMissing($0) }
+        if missing.allSatisfy({ $0 }) { return "missing-worktree" }
+        guard let lastUsedAt, lastUsedAt.isFinite, lastUsedAt > 0,
+              now().timeIntervalSince1970 - lastUsedAt > Self.unusedRetention else { return nil }
+        return "unused-over-24-hours"
+    }
+    func lastUse(_ device: String, legacy: Double) throws -> Double? {
+        let receipt = try DeviceActivity.latest(store: store, device: device)
+        // Legacy registry dates came from Orchard activity/run receipts; never device creation.
+        return [legacy > 0 ? legacy : nil, receipt].compactMap { $0 }.max()
     }
     func excluded(_ paths: Set<String>, _ exclusions: [String]) -> Bool {
         exclusions.contains { exclusion in
@@ -74,9 +88,11 @@ struct OrphanedDeviceCleanup: Sendable {
         let list = try await inventory()
         for record in records {
             var outcome = "preserved"
+            var usedAt: Double?
             var current = list.first { $0.udid == record.udid && $0.name == record.name }
             func action(_ reason: String, _ result: String) -> CleanupReport.Action {
                 .init(target: record.udid, reason: reason, outcome: result, name: record.name,
+                      lastUsedAt: usedAt.map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) },
                       estimatedBytes: current?.dataPathSize, state: current?.state,
                       requiresShutdown: current.map { $0.state == "Booted" })
             }
@@ -84,8 +100,9 @@ struct OrphanedDeviceCleanup: Sendable {
                 let paths = Set(record.owners.map(\.worktreePath))
                 guard UUID(uuidString: record.udid) != nil, !ArtifactStore.isStandardSimulator(record.name),
                       !excluded(paths, exclusions), let device = current else { continue }
-                guard try allMissing(paths) else {
-                    report.actions.append(action("worktree-exists-or-ownership-unknown", "preserved")); continue
+                usedAt = try lastUse(record.udid, legacy: record.lastUsedAt)
+                guard let reason = try eligibility(paths, lastUsedAt: usedAt) else {
+                    report.actions.append(action("recent-use-or-ownership-unknown", "preserved")); continue
                 }
                 guard ["Booted", "Shutdown"].contains(device.state) else {
                     report.actions.append(action("transitioning-device", "preserved")); continue
@@ -101,12 +118,13 @@ struct OrphanedDeviceCleanup: Sendable {
                 func unchanged() throws -> Bool {
                     guard let fresh = try store.read(ArtifactSimulator.self, at: store.simulatorURL(record.udid)),
                           fresh.name == record.name, fresh.owners == record.owners, fresh.lastUsedAt == record.lastUsedAt else { return false }
-                    return try allMissing(paths)
+                    return try lastUse(record.udid, legacy: fresh.lastUsedAt) == usedAt
+                        && eligibility(paths, lastUsedAt: usedAt) == reason
                 }
                 guard try unchanged() else {
                     report.actions.append(action("worktree-or-owner-changed", "preserved")); continue
                 }
-                if !apply { report.actions.append(action("missing-worktree", "would-remove")); continue }
+                if !apply { report.actions.append(action(reason, "would-remove")); continue }
                 guard let fresh = try await inventory().first(where: { $0.udid == device.udid }),
                       fresh.name == record.name, fresh.state == device.state,
                       try unchanged() else { report.actions.append(action("device-or-worktree-changed", "preserved")); continue }
@@ -131,8 +149,8 @@ struct OrphanedDeviceCleanup: Sendable {
                     throw OrchardError.message("Deletion not confirmed; no retry")
                 }
                 outcome = "removed"
-                try FileManager.default.removeItem(at: store.simulatorURL(record.udid))
-                report.actions.append(action("missing-worktree", outcome))
+                // Retain ownership as a tombstone so saved reruns can prepare a new branch device.
+                report.actions.append(action(reason, outcome))
             } catch {
                 report.error = report.error ?? String(describing: error)
                 report.actions.append(action(String(describing: error), outcome))
@@ -177,12 +195,12 @@ struct OrphanedDeviceCleanup: Sendable {
     func runningAVDs() async throws -> [String: String] {
         let output = try await adb(["devices"])
         var result: [String: String] = [:]
-        for line in output.split(separator: "\n").dropFirst() {
+        for line in output.split(whereSeparator: \.isNewline).dropFirst() {
             let columns = line.split(whereSeparator: { $0.isWhitespace })
             guard columns.count >= 2, columns[0].hasPrefix("emulator-") else { continue }
             guard columns[1] == "device" else { throw OrchardError.message("Offline emulator; ownership cannot be checked") }
             let serial = String(columns[0])
-            let name = try await adb(["-s", serial, "emu", "avd", "name"]).split(separator: "\n").map(String.init)
+            let name = try await adb(["-s", serial, "emu", "avd", "name"]).split(whereSeparator: \.isNewline).map(String.init)
             guard name.count == 2, name[1] == "OK", !name[0].isEmpty else { throw OrchardError.message("Unknown emulator identity") }
             result[serial] = name[0]
         }
@@ -218,16 +236,26 @@ struct OrphanedDeviceCleanup: Sendable {
                 let ownerPath = owners.map(\.owner.worktreePath)
                     .filter { ArtifactCleanup.contains(device.cwd, in: $0) }
                     .max(by: { $0.count < $1.count }) ?? device.cwd
-                guard !excluded([ownerPath], exclusions), try allMissing([ownerPath]) else {
-                    report.actions.append(.init(target: device.path.path, reason: "worktree-exists-or-ownership-unknown", outcome: "preserved", name: device.name)); continue
+                let usedAt = try lastUse(device.path.path, legacy: device.launchedAt)
+                guard !excluded([ownerPath], exclusions),
+                      let reason = try eligibility([ownerPath], lastUsedAt: usedAt) else {
+                    report.actions.append(.init(target: device.path.path, reason: "recent-use-or-ownership-unknown", outcome: "preserved", name: device.name)); continue
                 }
                 func unchanged() throws -> Bool {
-                    try avd(ini) == device && allMissing([ownerPath])
+                    try avd(ini) == device && lastUse(device.path.path, legacy: device.launchedAt) == usedAt
+                        && eligibility([ownerPath], lastUsedAt: usedAt) == reason
                 }
-                guard let lease = try ArtifactLease.tryAcquire(store.root.appendingPathComponent("locks/avd-\(ArtifactStore.key(device.path.path)).lock")) else {
-                    report.actions.append(.init(target: device.path.path, reason: "concurrent-avd-cleanup", outcome: outcome)); continue
+                let lockPaths = Set(owners.filter { $0.owner.worktreePath == ownerPath }.map { store.projectLock($0.owner.projectPath) }
+                    + [store.avdLock(device.path.path)]).sorted { $0.path < $1.path }
+                var leases: [ArtifactLease] = []
+                defer { leases.forEach { $0.close() } }
+                for path in lockPaths {
+                    guard let lease = try ArtifactLease.tryAcquire(path) else { break }
+                    leases.append(lease)
                 }
-                defer { lease.close() }
+                guard leases.count == lockPaths.count else {
+                    report.actions.append(.init(target: device.path.path, reason: "active-build-or-install", outcome: outcome, name: device.name)); continue
+                }
                 let manager = sdk.appendingPathComponent("cmdline-tools/latest/bin/avdmanager").path
                 guard FileManager.default.isExecutableFile(atPath: manager),
                       FileManager.default.isExecutableFile(atPath: sdk.appendingPathComponent("platform-tools/adb").path) else {
@@ -238,8 +266,8 @@ struct OrphanedDeviceCleanup: Sendable {
                 guard serials.count <= 1 else { throw OrchardError.message("Multiple running instances of AVD") }
                 guard try unchanged() else { throw OrchardError.message("Worktree or device association changed") }
                 if !apply {
-                    report.actions.append(.init(target: device.path.path, reason: "missing-worktree", outcome: "would-remove", name: device.name,
-                        state: serials.isEmpty ? "Shutdown" : "Booted", requiresShutdown: !serials.isEmpty)); continue
+                    report.actions.append(.init(target: device.path.path, reason: reason, outcome: "would-remove", name: device.name,
+                        lastUsedAt: usedAt.map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) }, state: serials.isEmpty ? "Shutdown" : "Booted", requiresShutdown: !serials.isEmpty)); continue
                 }
                 guard try unchanged(), try await runningAVDs() == running else { throw OrchardError.message("Emulator identity changed") }
                 if let serial = serials.first {
@@ -261,7 +289,7 @@ struct OrphanedDeviceCleanup: Sendable {
                 }
                 outcome = "removed"
                 running = nil
-                report.actions.append(.init(target: device.path.path, reason: "missing-worktree", outcome: outcome, name: device.name))
+                report.actions.append(.init(target: device.path.path, reason: reason, outcome: outcome, name: device.name))
             } catch {
                 report.error = report.error ?? String(describing: error)
                 report.actions.append(.init(target: ini.path, reason: String(describing: error), outcome: outcome))

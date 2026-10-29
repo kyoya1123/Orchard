@@ -50,7 +50,9 @@ Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使い�
 
 Orchardの起動・再オープン時、GUIからの実行時、CLIの`run`・`list`・`runs`・`simulator`を呼ぶたびに、所有元の分かる端末を確認します。ヘルプとcleanupのプレビューでは削除を予約しません。自動検査は既存の所有記録と`orphaned-devices`だけを使い、期限付きのロック・再試行と要求の集約を備えた別プロセスで動かします。失敗した要求は次回の呼び出しまで保留します。
 
-**関連する全worktreeのパスが存在しないと確認できた端末だけ**が対象です。worktreeが存在すれば、古さ・merge状況・Claude/Codexのアーカイブ状態によらず保持します。所有元不明、アクセス不能、壊れたリンク、端末名変更、識別情報の不一致も保持します。端末整理ではセッションDB・会話ファイル・プロセス一覧を読みません。iOSはOrchardが記録したUDIDとプロジェクトの対応、Androidは検証済みのAVD登録と起動記録で関連付けます。
+**関連する全worktreeが消失した端末、または最終使用から24時間を超えた端末**を整理します。ブランチごとの端末は維持します。ビルド・インストール・起動などを使用として記録し、起動しっぱなし・コンソール出力・cleanup列挙では期限を延ばしません。既存iOSはOrchardの使用日時（旧版が取り込んだ実行更新日時を含む保守的な値）、Androidは検証済み起動記録の更新日時を引き継ぎます。作成日時や移行時の現在時刻は使いません。所有元・日時不明、アクセス不能、壊れたリンク、識別情報の不一致は保持します。セッションDB・会話ファイル・プロセス一覧は読みません。
+
+Orchardのビルド中はロックで保護し、処理完了時に最終使用を更新します。外部iOSテストは`orchard device-use --simulator UDID -- xcodebuild ... test`、Androidは`orchard device-use --avd NAME -- ./gradlew ...`で実行すると、その端末を処理終了まで保護します。待機上限は既定2時間、最大24時間です。このラッパーを使わない外部処理はプロセス一覧から推測しません。
 
 対象が起動中なら、iOSはそのUDIDを`simctl`で停止・削除し、Androidは対応するADBシリアルだけを停止して`avdmanager`で削除します。削除直前にworktree・所有元・端末識別子を再確認します。停止を確認できなければ削除せず、他の端末・worktree・ブランチ・ソースは変更しません。端末を削除すると、その中のアプリと保存データも失われます。
 
@@ -59,7 +61,7 @@ orchard cleanup --scope orphaned-devices --no-discover --json
 orchard cleanup --scope orphaned-devices --no-discover --apply --json
 ```
 
-旧`archived-devices`は互換エイリアスで、アーカイブ情報は読みません。`simulators`は同じworktree存在条件をiOSだけに適用します。明示的な`derived-data`・`source-packages`は従来のキャッシュ整理を維持しますが、自動検査では呼びません。明示的なcleanupの既定scopeは`all`です。
+旧`archived-devices`は互換エイリアスで、アーカイブ情報は読みません。`simulators`は同じ24時間・worktree存在条件をiOSだけに適用します。明示的な`derived-data`・`source-packages`は従来のキャッシュ整理を維持しますが、自動検査では呼びません。明示的なcleanupの既定scopeは`all`です。
 
 プレビューでは停止・削除を行わず、端末ID・名前・状態・保持／削除理由を表示します。所有記録、`last-report.json`、呼び出しの保留・完了記録は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。除外は`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。失敗は`invocation-error.json`に記録し、後の検査が成功したら消去します。隔離テストでは`ORCHARD_DISABLE_BACKGROUND_CLEANUP=1`で自動workerを無効にできます。
 
@@ -144,3 +146,9 @@ Scripts/package-app.sh  # Orchard.app をビルド・パッケージング
 
 - `OrchardCore` — 探索(git worktree・Xcode プロジェクト)、`xcodebuild` / `simctl` / `devicectl` のオーケストレーション、選択解決、共有 Run ストア。
 - `OrchardApp` — `MenuBarExtra` の GUI と CLI のエントリポイント。
+
+## Xcode・runtime更新時
+
+選択中XcodeのSimulator SDK以上の利用可能runtimeが必要です。未インストールなら`Runtime migration pending`を表示し、旧端末への暗黙のフォールバックやruntime移行による削除を行いません。runtimeパッケージはダウンロード・アンインストールしません。
+
+毎回の呼び出しでruntime識別子・build、Xcode版・build、simctlパス、形式revisionを確認します。新baseの起動・検証・停止成功後に、旧世代のOrchard管理端末だけを個別停止・削除します。ビルド・テスト中や識別不明の端末は保護します。GUI起動・再実行とCLIの明示destinationも管理端末を再解決し、保存された古いUDIDを再利用しません。ブランチ端末は必要時に再作成されます。移行状況はcleanupレポート、削除記録は`SimulatorBases-v1/last-migration.json`に保存します。

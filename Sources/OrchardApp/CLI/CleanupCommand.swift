@@ -21,7 +21,7 @@ struct CleanupCommand: AsyncParsableCommand {
         }
         let shouldApply = apply
         let shouldDiscover = !noDiscover
-        let report = await Task.detached(priority: .background) {
+        let report = await Task.detached(priority: .utility) {
             await ArtifactCleanup().run(apply: shouldApply, directories: paths, discover: shouldDiscover, scope: selectedScope)
         }.value
         let encoder = JSONEncoder()

@@ -28,26 +28,31 @@ public struct ArtifactCleanup: Sendable {
     let deviceEnvironment: [String: String]
     let command: Command
     let now: @Sendable () -> Date
+    let runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)?
     static let retention: TimeInterval = 7 * 86400
 
     public init() {
         self.init(store: ArtifactStore(),
                   derivedData: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData"),
                   devices: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
-                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"))
+                  sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"),
+                  runtimeMaintenance: { await SimulatorBaseService().maintain() })
     }
 
     init(store: ArtifactStore, derivedData: URL, devices: URL, sourcePackages: URL? = nil,
          deviceHome: URL = FileManager.default.homeDirectoryForCurrentUser,
          deviceEnvironment: [String: String] = ProcessInfo.processInfo.environment,
          now: @escaping @Sendable () -> Date = { Date() },
+         runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)? = nil,
          command: @escaping Command = { executable, arguments in
              // CoreSimulator IPC can stall even for `list` at background QoS.
              // Keep the worker/queue at low priority; only its short simctl
              // client uses utility QoS. Filesystem collection remains throttled.
-             try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60,
-                 background: true, processQualityOfService: executable == "/usr/bin/xcrun" ? .utility : nil)
+             let ipc = executable == "/usr/bin/xcrun" || executable.hasSuffix("/adb")
+             return try await SimulatorProcess.execute(executable: executable, arguments: arguments, timeout: 60,
+                 background: !ipc, processQualityOfService: ipc ? .utility : nil)
          }) {
+        self.runtimeMaintenance = runtimeMaintenance
         self.store = store
         self.derivedData = derivedData
         self.devices = devices
@@ -86,8 +91,9 @@ public struct ArtifactCleanup: Sendable {
                 try await cleanDerivedData(owners: owners, settings: settings, apply: apply, report: &report)
             }
             if [.all, .simulators, .orphanedDevices, .archivedDevices].contains(scope) {
+                if apply, let runtimeMaintenance, let action = await runtimeMaintenance() { report.actions.append(action) }
                 let devicesReport = await OrphanedDeviceCleanup(store: store, devices: devices, home: deviceHome,
-                    environment: deviceEnvironment, command: command).run(apply: apply,
+                    environment: deviceEnvironment, now: now, command: command).run(apply: apply,
                         excludedPaths: settings.excludedPaths, includeAndroid: scope != .simulators)
                 report.actions += devicesReport.actions
                 if let error = devicesReport.error { report.error = error }
