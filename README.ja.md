@@ -152,8 +152,8 @@ ORCHARD_SIGNING_IDENTITY="Apple Development: Your Name (Certificate ID)" Scripts
 
 ## Xcode・runtime更新時
 
-選択中XcodeのSimulator SDK以上の利用可能runtimeが必要です。未インストールなら`Runtime migration pending`を表示し、旧端末への暗黙のフォールバックやruntime移行による削除を行いません。runtimeパッケージはダウンロード・アンインストールしません。
+指定モデルに対応する、インストール済みかつ利用可能な最新iOS runtimeを選びます。`simctl`のruntime別対応モデル一覧を優先し、一覧がない場合はモデルの最小・最大runtime情報で確認します。選択中XcodeのSimulator SDKより古いruntimeも許容します。例えばiPhone 18 Proは27.0、iPhone Duoは27.1を使用できます。`--runtime`の明示指定を守り、非対応・利用不可の組み合わせでは作成・削除前にエラーを表示します。runtimeパッケージはダウンロード・アンインストールしません。
 
-毎回の呼び出しでruntime識別子・build、Xcode版・build、simctlパス、形式revisionを確認します。新baseの起動・検証・停止成功後に、旧世代のOrchard管理端末だけを個別停止・削除します。ビルド・テスト中や識別不明の端末は保護します。GUI起動・再実行とCLIの明示destinationも管理端末を再解決し、保存された古いUDIDを再利用しません。ブランチ端末は必要時に再作成されます。移行状況はcleanupレポート、削除記録は`SimulatorBases-v1/last-migration.json`に保存します。
+モデルとruntimeごとにbaseを共存させ、runtime build・Xcode版/build・simctlパス・形式revisionも記録します。新baseと要求された複製の準備が成功してから、同じモデル・runtimeの旧世代だけを削除候補にします。別モデルや別runtimeを選んでも有効な端末を一括削除しません。ビルド・テスト中や識別不明の端末は保護します。GUI起動・再実行とCLIの明示destinationは、再作成時も保存されたモデル・runtimeを保持します。消失した端末のモデルが不明なら再選択を求めます。worktree消失・24時間未使用のcleanupは引き続き適用します。移行状況はcleanupレポート、削除記録は`SimulatorBases-v1/last-migration.json`に保存します。
 
 パッケージングには、`ORCHARD_SIGNING_IDENTITY`で指定するApple DevelopmentまたはDeveloper ID Applicationの固定証明書が必要です。アプリ全体を組み立てた後に署名・検証します。adhoc署名はビルドごとに識別が変わり、macOSのプライバシー許可を安定して引き継げません。旧adhoc版からの切り替え時には新しい署名のアプリを一度許可する必要がある場合があります。Orchardは設定の変更・リセットを行いません。GUI自身の権限診断は`~/Library/Application Support/Orchard/Diagnostics-v1/gui-accessibility.json`に保存します。

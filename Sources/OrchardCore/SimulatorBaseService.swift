@@ -11,7 +11,7 @@ public struct PreparedSimulator: Encodable, Sendable {
 }
 
 /// Templates have a private set. Registered clones in the default set are
-/// replaced after a usable new SDK/runtime generation has been initialized.
+/// replaced within the same device type/runtime after a new generation is ready.
 public struct SimulatorBaseService: Sendable {
     typealias Command = @Sendable (String, [String], TimeInterval) async throws -> String
     private let root: URL
@@ -53,9 +53,7 @@ public struct SimulatorBaseService: Sendable {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: root.appendingPathComponent("devices"), withIntermediateDirectories: true)
         let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(try await simctl(["list", "-j"]).utf8))
-        let sdkVersion = try await command("--sdk", ["iphonesimulator", "--show-sdk-version"], 30)
-        guard SimulatorCatalog.numbers(sdkVersion).count >= 2 else { throw OrchardError.message("Unable to identify selected Simulator SDK") }
-        let (type, runtime) = try catalog.resolve(selection, minimumRuntime: sdkVersion)
+        let (type, runtime) = try catalog.resolve(selection)
         let xcode = try await command("xcodebuild", ["-version"], 30)
         let simctlPath = try await command("--find", ["simctl"], 30)
         let configuration = Configuration(deviceType: type.identifier, runtime: runtime.identifier,
@@ -163,13 +161,13 @@ public struct SimulatorBaseService: Sendable {
         }
         // Clone first: a clone failure must not discard the previous template.
         try await pruneClones(registry: &registry, configuration: configuration, progress: progress)
-        try await prune(registry: &registry, keeping: base.udid, progress: progress)
+        try await prune(registry: &registry, keeping: base.udid, configuration: configuration, progress: progress)
         return result
     }
 
-    private func prune(registry: inout Registry, keeping id: String,
+    private func prune(registry: inout Registry, keeping id: String, configuration: Configuration,
                        progress: @Sendable (String) -> Void) async throws {
-        for entry in registry.entries where entry.udid != id {
+        for entry in registry.entries where entry.udid != id && entry.configuration.hasSameTarget(as: configuration) {
             do {
                 let devices = try await baseDevices()
                 guard let device = devices.devices[entry.configuration.runtime]?.first(where: { $0.udid == entry.udid }) else {
@@ -262,6 +260,10 @@ public struct SimulatorBaseService: Sendable {
         let xcode: String
         let simctlPath: String
         let revision: Int
+
+        func hasSameTarget(as other: Configuration) -> Bool {
+            deviceType == other.deviceType && runtime == other.runtime
+        }
     }
     struct Entry: Codable, Sendable {
         let udid: String
@@ -274,13 +276,16 @@ public struct SimulatorBaseService: Sendable {
 
     static func canReuse(_ id: String, clones: [Clone], configuration: Configuration) -> Bool {
         guard let clone = clones.first(where: { $0.udid == id }) else { return true }
-        return clone.configuration == configuration
+        // Legacy ownership did not record a generation. The caller still checks
+        // the live model/runtime; lack of a generation alone is not obsolescence.
+        return clone.configuration == nil || clone.configuration == configuration
     }
 
     private func pruneClones(registry: inout Registry, configuration: Configuration,
                              progress: @Sendable (String) -> Void) async throws {
         var actions: [CleanupReport.Action] = []
-        for clone in registry.clones ?? [] where clone.configuration != configuration {
+        for clone in registry.clones ?? [] where clone.configuration?.hasSameTarget(as: configuration) == true
+            && clone.configuration != configuration {
             do {
                 guard let lease = try ArtifactLease.tryAcquire(store.simulatorLock(clone.udid)) else {
                     actions.append(.init(target: clone.udid, reason: "active-build-or-test", outcome: "preserved", name: clone.name)); continue
@@ -325,8 +330,25 @@ public struct SimulatorBaseService: Sendable {
         guard destination.kind == .simulator,
               let record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(destination.id)),
               record.name == destination.name, !record.owners.isEmpty else { return destination }
-        let prepared = try await prepare(name: record.name, project: project)
+        let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(try await simctl(["list", "-j"]).utf8))
+        let selection = try Self.managedSelection(id: destination.id, name: record.name, catalog: catalog,
+                                                  clones: loadRegistry().clones ?? [])
+        let prepared = try await prepare(name: record.name, selection: selection, project: project)
         return XcodeDestination(id: prepared.udid, name: prepared.name, runtime: prepared.runtime, isAvailable: true, kind: .simulator)
+    }
+
+    static func managedSelection(id: String, name: String, catalog: SimulatorCatalog, clones: [Clone]) throws -> SimulatorSelection {
+        if let pair = catalog.devices.first(where: { $0.value.contains { $0.udid == id } }),
+           let device = pair.value.first(where: { $0.udid == id }) {
+            guard device.name == name, let type = device.deviceTypeIdentifier else {
+                throw OrchardError.message("Managed Simulator identity changed; select the intended destination again.")
+            }
+            return SimulatorSelection(deviceType: type, runtime: pair.key)
+        }
+        if let clone = clones.first(where: { $0.udid == id && $0.name == name }), let configuration = clone.configuration {
+            return SimulatorSelection(deviceType: configuration.deviceType, runtime: configuration.runtime)
+        }
+        throw OrchardError.message("The saved Simulator is missing and its device type is unknown. Select a device type and runtime again.")
     }
 
     func maintain() async -> CleanupReport.Action? {
