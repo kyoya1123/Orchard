@@ -25,11 +25,7 @@ struct StopCommand: AsyncParsableCommand {
         // The owner handles SIGTERM by tearing down the launched app and
         // recording `stopped`, which can take a while for a device app.
         kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(60)
-        while Date() < deadline, kill(pid, 0) == 0 {
-            try await Task.sleep(nanoseconds: 200_000_000)
-        }
-        guard kill(pid, 0) != 0 else {
+        guard await CLIEnvironment.waitForExit(pid: pid, timeout: 60, interval: .milliseconds(200)) else {
             FileHandle.standardError.write(Data("Run \(record.id) (pid \(pid)) did not exit within 60s.\n".utf8))
             throw ExitCode(1)
         }

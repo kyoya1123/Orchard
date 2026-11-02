@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 /// Discovery metadata only. Artifact ownership/retention is tracked separately.
@@ -60,9 +59,7 @@ public struct RepositoryRegistry: Sendable {
         let git = GitService()
         let entry: RegisteredRepository
         if let info = await git.info(from: projectRoot) {
-            let common = try await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/git"),
-                arguments: ["-C", projectRoot.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                currentDirectoryURL: nil)
+            let common = try await git.commonDirectory(from: projectRoot)
             let commonURL = URL(fileURLWithPath: common).resolvingSymlinksInPath().standardizedFileURL
             let worktree = info.rootURL.resolvingSymlinksInPath().standardizedFileURL
             guard projectRoot.path == worktree.path || projectRoot.path.hasPrefix(worktree.path + "/") else {
@@ -78,7 +75,7 @@ public struct RepositoryRegistry: Sendable {
                 gitCommonDirectoryPath: nil, projectDirectories: ["."])
         }
 
-        let key = SHA256.hash(data: Data(entry.id.utf8)).map { String(format: "%02x", $0) }.joined()
+        let key = ArtifactStore.key(entry.id)
         let lease = try await ArtifactLease.acquire(root.appendingPathComponent("locks/\(key).lock"), shared: false)
         defer { lease.close() }
         let file = recordsDirectory.appendingPathComponent(key + ".json")
@@ -118,8 +115,7 @@ public struct ProjectDiscovery: Sendable {
     private func resolveScoped(_ directories: [URL], entries: [RegisteredRepository]) async -> [WorktreeContext] {
         var commonPaths = Set<String>()
         for directory in directories {
-            if let common = try? await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/git"),
-                arguments: ["-C", directory.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], currentDirectoryURL: nil) {
+            if let common = try? await GitService().commonDirectory(from: directory) {
                 commonPaths.insert(URL(fileURLWithPath: common).resolvingSymlinksInPath().path)
             }
         }

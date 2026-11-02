@@ -35,7 +35,6 @@ public struct XcodeService: Sendable {
                     id: device.identifier,
                     name: device.name,
                     runtime: device.operatingSystemVersion,
-                    isAvailable: device.available,
                     kind: device.supportedDestinationKind ?? .simulator,
                     modelCode: device.modelCode ?? ""
                 )
@@ -51,21 +50,6 @@ public struct XcodeService: Sendable {
 
                 return $0.name < $1.name
             }
-    }
-
-    public func simulatorDestinations() async throws -> [XcodeDestination] {
-        try await destinations().filter { $0.kind == .simulator }
-    }
-
-    public func buildSettings(
-        project: XcodeProject,
-        scheme: String,
-        destination: XcodeDestination
-    ) async throws -> XcodeBuildSettings {
-        try await SourcePackageCache().withCache(project: project) { packageArguments in
-            try await buildSettings(project: project, scheme: scheme, destination: destination,
-                                    packageArguments: packageArguments)
-        }
     }
 
     // The caller owns the cache lease; do not acquire it again during build/run.

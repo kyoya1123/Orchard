@@ -10,18 +10,6 @@ struct ListCommand: AsyncParsableCommand {
     )
 }
 
-private let listEncoder: JSONEncoder = {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes, .sortedKeys]
-    return encoder
-}()
-
-private func printJSON<T: Encodable>(_ value: T) {
-    if let data = try? listEncoder.encode(value), let string = String(data: data, encoding: .utf8) {
-        print(string)
-    }
-}
-
 struct ListBranches: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "branches", abstract: "List discovered branches / worktrees.")
 
@@ -34,7 +22,7 @@ struct ListBranches: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json)
+        let env = CLIEnvironment(directoryURLs: directories.directoryURLs, json: directories.json)
         let worktrees = await env.worktrees()
         let rows = worktrees.map {
             Row(branch: $0.branchName, path: $0.worktreeURL.path, project: $0.project.displayName)
@@ -61,7 +49,7 @@ struct ListSchemes: AsyncParsableCommand {
     @OptionGroup var directories: DirectoryOptions
 
     mutating func run() async throws {
-        let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json)
+        let env = CLIEnvironment(directoryURLs: directories.directoryURLs, json: directories.json)
         let worktrees = await env.worktrees()
 
         let worktree: WorktreeContext
@@ -108,9 +96,8 @@ struct ListDestinations: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let env = CLIEnvironment(extraDirectoryPaths: [], json: json)
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
-        var destinations = try await env.destinations()
+        var destinations = try await XcodeService().destinations()
         if let kindFilter {
             destinations = destinations.filter { $0.kind == kindFilter }
         }

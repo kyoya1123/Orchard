@@ -10,8 +10,7 @@ struct ArtifactOwner: Codable, Hashable, Sendable {
     static func resolve(_ project: XcodeProject) async throws -> Self {
         let root = try await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/git"),
             arguments: ["rev-parse", "--show-toplevel"], currentDirectoryURL: project.rootURL)
-        let common = try await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/git"),
-            arguments: ["rev-parse", "--path-format=absolute", "--git-common-dir"], currentDirectoryURL: project.rootURL)
+        let common = try await GitService().commonDirectory(from: project.rootURL)
         return Self(projectPath: project.fileURL.resolvingSymlinksInPath().path,
                     worktreePath: URL(fileURLWithPath: root).resolvingSymlinksInPath().path,
                     repositoryPath: URL(fileURLWithPath: common).deletingLastPathComponent().resolvingSymlinksInPath().path)
@@ -41,7 +40,11 @@ struct ArtifactStore: Sendable {
     func simulatorLock(_ udid: String) -> URL { root.appendingPathComponent("locks/simulator-\(Self.key(udid)).lock") }
 
     static func key(_ path: String) -> String {
-        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        key(Data(path.utf8))
+    }
+
+    static func key(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     func read<T: Decodable>(_ type: T.Type, at path: URL) throws -> T? {
@@ -67,6 +70,7 @@ struct ArtifactStore: Sendable {
     }
 }
 
+/// flock coordinates every orchard process, which an actor alone would not.
 /// Shared leases cover builds and installation; the collector only tries an
 /// exclusive lease. A busy project never makes background collection wait.
 final class ArtifactLease: @unchecked Sendable {
@@ -81,15 +85,18 @@ final class ArtifactLease: @unchecked Sendable {
         guard flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 else {
             let code = errno
             Darwin.close(fd)
-            if code == EWOULDBLOCK { return nil }
+            if code == EWOULDBLOCK || code == EINTR { return nil }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         return ArtifactLease(fd)
     }
 
-    static func acquire(_ path: URL, shared: Bool = true) async throws -> ArtifactLease {
+    /// Polls nonblocking attempts so the executor stays responsive and the wait cancellable.
+    static func acquire(_ path: URL, shared: Bool = true,
+                        checkCancellation: () throws -> Void = {}) async throws -> ArtifactLease {
         while true {
             try Task.checkCancellation()
+            try checkCancellation()
             if let lease = try tryAcquire(path, shared: shared) { return lease }
             try await Task.sleep(for: .milliseconds(50))
         }

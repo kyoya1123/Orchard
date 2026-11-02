@@ -62,7 +62,7 @@ struct RunCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         RunStore.shared.pruneOrphaned()
-        let env = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json, quiet: quiet)
+        let env = CLIEnvironment(directoryURLs: directories.directoryURLs, json: directories.json, quiet: quiet)
         let kindFilter = destinationKindFilter(device: device, simulator: simulator)
         let selection = branchSimulator ? SimulatorSelection(deviceType: deviceType, runtime: runtime) : nil
 
@@ -85,7 +85,6 @@ struct RunCommand: AsyncParsableCommand {
                     destination: destination ?? "",
                     kindFilter: kindFilter,
                     timeout: timeout,
-                    detached: false,
                     simulatorSelection: selection,
                     runID: runID
                 )

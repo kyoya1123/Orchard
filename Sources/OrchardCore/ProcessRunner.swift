@@ -1,8 +1,6 @@
 import Foundation
 
-public struct ProcessRunner: Sendable {
-    public init() {}
-
+public enum ProcessRunner {
     public static func run(
         executableURL: URL,
         arguments: [String],

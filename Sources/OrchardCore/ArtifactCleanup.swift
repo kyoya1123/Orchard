@@ -201,15 +201,21 @@ public struct ArtifactCleanup: Sendable {
         return true
     }
 
+    private static let buildServiceNames: Set<String> = ["XCBBuildService", "XCBuildService", "SWBBuildService"]
+
+    private func processes() async throws -> [(pid: String, path: String)] {
+        try await command("/bin/ps", ["-axo", "pid=,comm="]).split(separator: "\n").compactMap {
+            let pieces = $0.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            return pieces.count == 2 ? (String(pieces[0]), String(pieces[1])) : nil
+        }
+    }
+
     private func externallyUsed(_ directory: URL) async throws -> Bool {
-        let processes = try await command("/bin/ps", ["-axo", "pid=,comm="])
         var buildServices: [String] = []
-        for line in processes.split(separator: "\n") {
-            let pieces = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-            guard pieces.count == 2 else { continue }
-            let name = URL(fileURLWithPath: String(pieces[1])).lastPathComponent
+        for process in try await processes() {
+            let name = URL(fileURLWithPath: process.path).lastPathComponent
             if name == "xcodebuild" { return true }
-            if ["XCBBuildService", "XCBuildService", "SWBBuildService"].contains(name) { buildServices.append(String(pieces[0])) }
+            if Self.buildServiceNames.contains(name) { buildServices.append(process.pid) }
         }
         guard !buildServices.isEmpty else { return false }
         let files = try await command("/usr/sbin/lsof", ["-nP", "-a", "-p", buildServices.joined(separator: ","), "-F", "n"])
@@ -313,7 +319,7 @@ public struct ArtifactCleanup: Sendable {
         let branch = try await git(owner.worktreePath, ["symbolic-ref", "-q", "HEAD"])
         let base = try await git(owner.repositoryPath, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
         guard branch.hasPrefix("refs/heads/"), base.hasPrefix("refs/remotes/origin/"),
-              String(branch.dropFirst("refs/heads/".count)).replacingOccurrences(of: "/", with: "-") == simulatorName,
+              SimulatorBaseService.simulatorName(forBranch: String(branch.dropFirst("refs/heads/".count))) == simulatorName,
               branch != "refs/heads/" + base.dropFirst("refs/remotes/origin/".count),
               try await git(owner.worktreePath, ["status", "--porcelain", "--untracked-files=all",
                   "--ignore-submodules=none"]).isEmpty else { return false }
@@ -347,11 +353,10 @@ public struct ArtifactCleanup: Sendable {
     }
 
     private func externalUsage() async throws -> ExternalUsage {
-        let processes = try await command("/bin/ps", ["-axo", "pid=,comm="])
-        let buildRunning = processes.split(separator: "\n").contains(where: {
-            let name = URL(fileURLWithPath: String($0.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).last ?? "")).lastPathComponent
-            return ["xcodebuild", "XCBBuildService", "XCBuildService", "SWBBuildService"].contains(name)
-        })
+        let buildRunning = try await processes().contains {
+            let name = URL(fileURLWithPath: $0.path).lastPathComponent
+            return name == "xcodebuild" || Self.buildServiceNames.contains(name)
+        }
         if buildRunning { return ExternalUsage(buildRunning: true, openPaths: []) }
         let files = try await command("/usr/sbin/lsof", ["-nP", "-F", "pn"])
         var pid: String?
@@ -368,11 +373,7 @@ public struct ArtifactCleanup: Sendable {
     // seen spinning at several cores' worth of CPU for days after their device was deleted.
     private func deviceProcesses(_ device: Device) async throws -> [String] {
         let root = devices.appendingPathComponent(device.udid).path
-        return try await command("/bin/ps", ["-axo", "pid=,comm="]).split(separator: "\n").compactMap {
-            let pieces = $0.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-            guard pieces.count == 2, Self.contains(String(pieces[1]), in: root) else { return nil }
-            return String(pieces[0])
-        }
+        return try await processes().filter { Self.contains($0.path, in: root) }.map(\.pid)
     }
 
     private func terminateDeviceProcesses(_ device: Device) async throws -> Bool {

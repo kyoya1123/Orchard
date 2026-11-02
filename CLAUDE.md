@@ -60,14 +60,13 @@ Fallback scanning also checks `.worktrees` and `.claude/worktrees`.
 ## Source Map
 
 - `Sources/OrchardCLI/`
-  - `main.swift`: entry point.
-  - `OrchardCLI.swift`: root command, shared `--dir`/`--json` options, concrete-type dispatch (`runOrchardCLI`).
+  - `OrchardCLI.swift`: `@main` root command, shared `--dir`/`--json` options and directory resolution, JSON output.
   - `RunCommand.swift`: `run` subcommand and exit-code mapping.
   - `RunsCommand.swift` / `StopCommand.swift`: follow and stop runs through the run store.
   - `ListCommand.swift`: `list branches|schemes|destinations`.
   - `SimulatorCommand.swift`: `simulator base|ensure`.
   - `CleanupCommand.swift`: `cleanup` and the hidden `cleanup-worker`.
-  - `CLIEnvironment.swift`: directory resolution, fetching, delegation, build-log wiring, signal/timeout handling, NDJSON events, run records.
+  - `CLIEnvironment.swift`: fetching, delegation, build-log wiring, signal/timeout handling, NDJSON events, run records.
 - `Sources/OrchardCore/WorktreeContext.swift`
   - Worktree and configured-directory discovery.
 - `Sources/OrchardCore/ProjectDetector.swift`

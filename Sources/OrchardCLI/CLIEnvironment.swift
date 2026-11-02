@@ -11,10 +11,9 @@ struct BuildFailure: Error, CustomStringConvertible {
     var description: String { message }
 }
 
-/// Shared machinery for the `run` and `list` subcommands: resolves which
-/// directories to scan, fetches worktrees/schemes/destinations via the same
-/// `OrchardCore` services, wires build logs to stdout/stderr,
-/// and manages clean Ctrl-C teardown.
+/// Shared machinery for the `run` and `list` subcommands: fetches
+/// worktrees/schemes/destinations via the same `OrchardCore` services, wires
+/// build logs to stdout/stderr, and manages clean Ctrl-C teardown.
 final class CLIEnvironment: @unchecked Sendable {
     let directoryURLs: [URL]
     let json: Bool
@@ -23,23 +22,22 @@ final class CLIEnvironment: @unchecked Sendable {
     private let xcodeService = XcodeService()
     private let outputLock = NSLock()
 
-    // Guards `service`, `interrupted`, `externallyStopped`, `timedOut`, and
-    // `launchedEmitted`, which are touched from the signal/timeout queues and
-    // the console callback (arbitrary thread) as well as the main run task.
+    /// Ordered by precedence when several arrive: an intentional stop wins, so
+    /// the run ends cleanly (exit 0) instead of looking like a crash to a background task.
+    private enum StopReason: Int, Comparable {
+        case timedOut, interrupted, externallyStopped
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    // Guards `stopReason` and `launchedEmitted`, which are touched from the
+    // signal/timeout queues and the console callback (arbitrary thread) as well
+    // as the main run task.
     private let stateLock = NSLock()
-    private var service: BuildRunService?
-    private var interrupted = false
-    // Set when `orchard stop` (or a superseding run) asks this run to stop via SIGTERM.
-    // Unlike a Ctrl-C interrupt, this is an intentional user action, so the run
-    // ends cleanly (exit 0) instead of looking like a crash to a background task.
-    private var externallyStopped = false
-    private var timedOut = false
+    private var stopReason: StopReason?
     // Set once the first console chunk arrives, so `emitConsole` can announce
     // "Launched" exactly once for callers polling progress instead of stdout.
     private var launchedEmitted = false
-    private var activeDestination: XcodeDestination?
-    private var signalSource: DispatchSourceSignal?
-    private var termSignalSource: DispatchSourceSignal?
+    private var signalSources: [DispatchSourceSignal] = []
 
     // Run record read by `orchard runs` / `orchard stop`. Guarded by recordLock since
     // it is mutated from build callbacks running on arbitrary threads.
@@ -47,19 +45,8 @@ final class CLIEnvironment: @unchecked Sendable {
     private var record: RunRecord?
     private var lastPersist: Date?
 
-    /// Directory precedence: explicit `--dir` overrides everything, then the
-    /// `ORCHARD_DIRS` env var (colon-separated). With neither, discovery prefers
-    /// the current project, then shared manual/automatic registration.
-    init(extraDirectoryPaths: [String], json: Bool, quiet: Bool = false) {
-        var paths = extraDirectoryPaths
-
-        if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["ORCHARD_DIRS"], !envValue.isEmpty {
-            paths = envValue.split(separator: ":").map(String.init)
-        }
-
-        directoryURLs = paths.map {
-            URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
-        }
+    init(directoryURLs: [URL], json: Bool, quiet: Bool = false) {
+        self.directoryURLs = directoryURLs
         self.json = json
         self.quiet = quiet
     }
@@ -84,10 +71,6 @@ final class CLIEnvironment: @unchecked Sendable {
         catch {
             FileHandle.standardError.write(Data("Could not add project to Orchard: \(error.localizedDescription)\n".utf8))
         }
-    }
-
-    func destinations() async throws -> [XcodeDestination] {
-        try await xcodeService.destinations()
     }
 
     // MARK: - Resolution
@@ -117,15 +100,15 @@ final class CLIEnvironment: @unchecked Sendable {
 
         if let simulatorSelection {
             let prepared = try await SimulatorBaseService().prepare(
-                name: worktree.branchName.replacingOccurrences(of: "/", with: "-"),
+                name: SimulatorBaseService.simulatorName(forBranch: worktree.branchName),
                 selection: simulatorSelection, project: worktree.project, progress: { self.emitProgress($0) })
             return (worktree, resolvedScheme, XcodeDestination(id: prepared.udid, name: prepared.name,
-                runtime: prepared.runtime, isAvailable: true, kind: .simulator))
+                runtime: prepared.runtime, kind: .simulator))
         }
 
         let destinationList: [XcodeDestination]
         do {
-            destinationList = try await destinations()
+            destinationList = try await xcodeService.destinations()
         } catch {
             throw BuildFailure(message: "Failed to list destinations: \(error)")
         }
@@ -199,7 +182,6 @@ final class CLIEnvironment: @unchecked Sendable {
         destination: String,
         kindFilter: XcodeDestination.Kind?,
         timeout: Int?,
-        detached: Bool,
         simulatorSelection: SimulatorSelection? = nil,
         runID: String? = nil
     ) async throws {
@@ -223,17 +205,14 @@ final class CLIEnvironment: @unchecked Sendable {
         emitProgress("Selected \(worktree.branchName) · \(resolvedScheme) · \(resolvedDestination.displayName)")
 
         let service = BuildRunService()
-        setService(service)
-        activeDestination = resolvedDestination
-        installSignalHandler()
-        defer { teardownSignalHandler() }
+        installSignalHandlers(service: service)
+        defer { teardownSignalHandlers() }
 
         let buildTask = Task {
             try await service.buildAndRun(
                 project: worktree.project,
                 scheme: resolvedScheme,
                 destination: resolvedDestination,
-                attachConsole: !detached,
                 progress: { self.emitProgress($0) },
                 consoleLog: { self.emitConsole($0) },
                 commandLog: { self.emitCommand($0) }
@@ -245,38 +224,26 @@ final class CLIEnvironment: @unchecked Sendable {
             timeoutTask = Task {
                 try? await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
-                self.markTimedOut()
-                self.emitProgress("Timeout reached after \(timeout)s — stopping")
-                self.currentService()?.stop()
+                self.requestStop(.timedOut, message: "Timeout reached after \(timeout)s — stopping", service: service)
             }
         }
 
-        do {
-            try await buildTask.value
-            timeoutTask?.cancel()
-        } catch {
-            timeoutTask?.cancel()
-
-            // `orchard stop` (or being superseded) is an intentional user
-            // action, not a failure. Tear the launched app down the same way, but
-            // finish as a clean `stopped` with exit 0 so a background task running
-            // this run doesn't treat it as a crash.
-            if isExternallyStopped() {
-                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+        let result = await buildTask.result
+        timeoutTask?.cancel()
+        if case let .failure(error) = result {
+            guard let reason = currentStopReason() else { throw BuildFailure(message: "\(error)") }
+            // The launched app must be torn down too, not just the local
+            // xcrun/xcodebuild process that `stop()` killed.
+            await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+            switch reason {
+            case .externallyStopped:
                 emitResult(status: "stopped", exitCode: 0)
                 return
-            }
-            // SIGINT (Ctrl-C) and timeout both need the launched app torn down,
-            // not just the local xcrun/xcodebuild process that `stop()` killed.
-            if isInterrupted() {
-                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+            case .interrupted:
                 throw InterruptedError()
-            }
-            if isTimedOut() {
-                await service.stopCompletely(destination: resolvedDestination) { [weak self] in self?.emitProgress($0) }
+            case .timedOut:
                 throw BuildFailure(message: "Timed out after \(timeout ?? 0)s")
             }
-            throw BuildFailure(message: "\(error)")
         }
 
         emitResult(status: "completed", exitCode: 0)
@@ -284,80 +251,47 @@ final class CLIEnvironment: @unchecked Sendable {
 
     // MARK: - Signal handling
 
-    private func installSignalHandler() {
-        signal(SIGINT, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+    private func installSignalHandlers(service: BuildRunService) {
+        signalSources = [
+            makeStopSource(SIGINT, .interrupted, message: "Interrupted — stopping run", service: service),
+            // SIGTERM comes from `orchard stop` or a superseding run.
+            makeStopSource(SIGTERM, .externallyStopped, message: "Stopped from Orchard", service: service)
+        ]
+    }
+
+    private func makeStopSource(_ signalNumber: Int32, _ reason: StopReason, message: String,
+                                service: BuildRunService) -> DispatchSourceSignal {
+        signal(signalNumber, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
         source.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.markInterrupted()
-            self.emitProgress("Interrupted — stopping run")
-            self.currentService()?.stop()
+            self?.requestStop(reason, message: message, service: service)
         }
         source.resume()
-        signalSource = source
+        return source
+    }
 
-        // SIGTERM = intentional stop from `orchard stop` or a superseding run.
-        // Treated as a clean stop, not an interrupt/crash.
-        signal(SIGTERM, SIG_IGN)
-        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        termSource.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.markExternallyStopped()
-            self.emitProgress("Stopped from Orchard")
-            self.currentService()?.stop()
+    private func teardownSignalHandlers() {
+        for source in signalSources {
+            source.cancel()
+            signal(Int32(source.handle), SIG_DFL)
         }
-        termSource.resume()
-        termSignalSource = termSource
+        signalSources = []
     }
 
     // MARK: - Synchronized run state
 
-    private func setService(_ newService: BuildRunService?) {
+    private func requestStop(_ reason: StopReason, message: String, service: BuildRunService) {
         stateLock.lock()
-        service = newService
+        stopReason = max(stopReason ?? reason, reason)
         stateLock.unlock()
+        emitProgress(message)
+        service.stop()
     }
 
-    private func currentService() -> BuildRunService? {
+    private func currentStopReason() -> StopReason? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return service
-    }
-
-    private func markInterrupted() {
-        stateLock.lock()
-        interrupted = true
-        stateLock.unlock()
-    }
-
-    private func isInterrupted() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return interrupted
-    }
-
-    private func markExternallyStopped() {
-        stateLock.lock()
-        externallyStopped = true
-        stateLock.unlock()
-    }
-
-    private func isExternallyStopped() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return externallyStopped
-    }
-
-    private func markTimedOut() {
-        stateLock.lock()
-        timedOut = true
-        stateLock.unlock()
-    }
-
-    private func isTimedOut() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return timedOut
+        return stopReason
     }
 
     /// Returns true only on the first call, so callers can fire a one-time
@@ -368,16 +302,6 @@ final class CLIEnvironment: @unchecked Sendable {
         guard !launchedEmitted else { return false }
         launchedEmitted = true
         return true
-    }
-
-    private func teardownSignalHandler() {
-        signalSource?.cancel()
-        signalSource = nil
-        signal(SIGINT, SIG_DFL)
-
-        termSignalSource?.cancel()
-        termSignalSource = nil
-        signal(SIGTERM, SIG_DFL)
     }
 
     // MARK: - Output
@@ -446,19 +370,21 @@ final class CLIEnvironment: @unchecked Sendable {
         for record in store.loadAll() where record.destination.id == destinationID {
             if record.status == .running, let pid = record.pid, pid != ProcessInfo.processInfo.processIdentifier {
                 kill(pid, SIGTERM)
-                await waitForExit(pid: pid, timeout: 5)
+                await Self.waitForExit(pid: pid, timeout: 5)
             }
             store.remove(id: record.id)
         }
     }
 
-    private func waitForExit(pid: Int32, timeout: Double) async {
+    /// Returns whether the process exited within `timeout`.
+    @discardableResult
+    static func waitForExit(pid: Int32, timeout: TimeInterval, interval: Duration = .milliseconds(100)) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            // kill(pid, 0) fails once the process is gone.
-            if kill(pid, 0) != 0 { return }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        while kill(pid, 0) == 0 {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(for: interval)
         }
+        return true
     }
 
     // MARK: - Run record
@@ -518,7 +444,9 @@ final class CLIEnvironment: @unchecked Sendable {
     private static func boundedAppend(_ existing: String, _ chunk: String) -> String {
         let combined = existing + chunk
         let maxLength = 80_000
-        return combined.count > maxLength ? String(combined.suffix(maxLength)) : combined
+        // `count` walks every grapheme; the UTF-8 length is O(1) and never smaller.
+        guard combined.utf8.count > maxLength, combined.count > maxLength else { return combined }
+        return String(combined.suffix(maxLength))
     }
 
     func emitError(_ message: String) {
