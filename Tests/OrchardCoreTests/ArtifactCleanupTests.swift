@@ -306,6 +306,28 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testOrphanProcessOfShutdownSimulatorIsKilledBeforeDelete() async throws {
+        let f = try fixture()
+        let id = try await simulator(f, age: 3 * 86400)
+        let app = f.worker.devices.appendingPathComponent("\(id)/data/Containers/Bundle/Application/X/App.app/App").path
+        await f.commands.addProcess("4242", path: app)
+        let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+        let calls = await f.commands.verbs
+        XCTAssertLessThan(try XCTUnwrap(calls.firstIndex(of: "kill")), try XCTUnwrap(calls.firstIndex(of: "delete")))
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
+    }
+
+    func testSurvivingOrphanProcessPreventsDelete() async throws {
+        let f = try fixture()
+        let id = try await simulator(f, age: 3 * 86400)
+        let app = f.worker.devices.appendingPathComponent("\(id)/data/Containers/Bundle/Application/X/App.app/App").path
+        await f.commands.addProcess("4242", path: app, surviveKill: true)
+        let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+        let calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains("delete"))
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "orphan-processes-survived" && $0.outcome == "preserved" })
+    }
+
     func testMergedOwnerRequiresCleanNonDefaultBranchAndCachedAncestry() async throws {
         for mode in ["merged", "dirty", "unmerged", "default", "detached", "missing-remote", "renamed-branch"] {
             let f = try fixture()
@@ -362,6 +384,12 @@ actor CleanupCommands {
     var bootOnInspection: String?
     var mergeMode = ""
     var mergeWorktree = ""
+    var processes: [String: String] = [:]
+    var processesSurviveKill = false
+    func addProcess(_ pid: String, path: String, surviveKill: Bool = false) {
+        processes[pid] = path
+        processesSurviveKill = surviveKill
+    }
     func setOpenPath(_ path: String) { openPath = path }
     func bootDuringInspection(_ id: String) { bootOnInspection = id }
     func setDates(_ id: String, used: String?, booted: String?) {
@@ -379,10 +407,17 @@ actor CleanupCommands {
     func startBuildDuringPackageCheck() { buildDuringPackageCheck = true }
 
     func run(_ tool: String, _ args: [String]) throws -> String {
-        if tool == "/bin/ps" { return externalBuild ? "123 /usr/bin/xcodebuild\n" : "" }
+        if tool == "/bin/ps" {
+            return (externalBuild ? "123 /usr/bin/xcodebuild\n" : "") + processes.map { "  \($0.key) \($0.value)\n" }.joined()
+        }
+        if tool == "/bin/kill" {
+            verbs.append("kill")
+            if !processesSurviveKill { args.dropFirst().forEach { processes.removeValue(forKey: $0) } }
+            return ""
+        }
         if tool == "/usr/sbin/lsof" {
             if let id = bootOnInspection { devices[id]?["state"] = "Booted"; bootOnInspection = nil }
-            return openPath.isEmpty ? "" : "n" + openPath + "\n"
+            return processes.map { "p\($0.key)\nn\($0.value)\n" }.joined() + (openPath.isEmpty ? "" : "n" + openPath + "\n")
         }
         if tool == "/usr/bin/git" {
             if !mergeMode.isEmpty {

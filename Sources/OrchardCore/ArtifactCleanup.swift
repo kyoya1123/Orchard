@@ -338,9 +338,11 @@ public struct ArtifactCleanup: Sendable {
 
     struct ExternalUsage {
         let buildRunning: Bool
-        let openPaths: [String]
-        func contains(_ paths: [String]) -> Bool {
-            buildRunning || openPaths.contains { file in paths.contains { ArtifactCleanup.contains(file, in: $0) } }
+        let openPaths: [(pid: String?, path: String)]
+        func contains(_ paths: [String], ignoring pids: Set<String> = []) -> Bool {
+            buildRunning || openPaths.contains { file in
+                !(file.pid.map(pids.contains) ?? false) && paths.contains { ArtifactCleanup.contains(file.path, in: $0) }
+            }
         }
     }
 
@@ -351,9 +353,39 @@ public struct ArtifactCleanup: Sendable {
             return ["xcodebuild", "XCBBuildService", "XCBuildService", "SWBBuildService"].contains(name)
         })
         if buildRunning { return ExternalUsage(buildRunning: true, openPaths: []) }
-        let files = try await command("/usr/sbin/lsof", ["-nP", "-F", "n"])
-        return ExternalUsage(buildRunning: false, openPaths: files.split(separator: "\n")
-            .filter { $0.hasPrefix("n") }.map { String($0.dropFirst()) })
+        let files = try await command("/usr/sbin/lsof", ["-nP", "-F", "pn"])
+        var pid: String?
+        var openPaths: [(pid: String?, path: String)] = []
+        for line in files.split(separator: "\n") {
+            if line.hasPrefix("p") { pid = String(line.dropFirst()) }
+            else if line.hasPrefix("n") { openPaths.append((pid, String(line.dropFirst()))) }
+        }
+        return ExternalUsage(buildRunning: false, openPaths: openPaths)
+    }
+
+    // A Shutdown device has no launchd_sim, so any process still running from its
+    // data directory was orphaned by an earlier teardown. Such processes have been
+    // seen spinning at several cores' worth of CPU for days after their device was deleted.
+    private func deviceProcesses(_ device: Device) async throws -> [String] {
+        let root = devices.appendingPathComponent(device.udid).path
+        return try await command("/bin/ps", ["-axo", "pid=,comm="]).split(separator: "\n").compactMap {
+            let pieces = $0.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard pieces.count == 2, Self.contains(String(pieces[1]), in: root) else { return nil }
+            return String(pieces[0])
+        }
+    }
+
+    private func terminateDeviceProcesses(_ device: Device) async throws -> Bool {
+        for signal in ["-TERM", "-KILL"] {
+            let pids = try await deviceProcesses(device)
+            if pids.isEmpty { return true }
+            _ = try? await command("/bin/kill", [signal] + pids)
+            for _ in 0..<10 {
+                if try await deviceProcesses(device).isEmpty { return true }
+                try await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+        return try await deviceProcesses(device).isEmpty
     }
 
     private func simulatorPaths(_ device: Device, _ owners: Set<ArtifactOwner>) -> [String] {
@@ -405,10 +437,14 @@ public struct ArtifactCleanup: Sendable {
                 guard let reason = try await simulatorReason(record, device: device) else {
                     report.actions.append(action(lastUse(record, device) == nil ? "unknown-last-use" : "recent-or-unmerged", "preserved")); continue
                 }
-                guard !usage.contains(simulatorPaths(device, record.owners)) else {
+                let orphans = try await deviceProcesses(device)
+                guard !usage.contains(simulatorPaths(device, record.owners), ignoring: Set(orphans)) else {
                     report.actions.append(action("external-use", "preserved")); continue
                 }
                 if apply {
+                    guard try await terminateDeviceProcesses(device) else {
+                        report.actions.append(action("orphan-processes-survived", "preserved")); continue
+                    }
                     // Never shutdown a device. Check usage and state again after
                     // subprocesses, immediately before the supported per-device delete.
                     guard try await !externalUsage().contains(simulatorPaths(device, record.owners)),
