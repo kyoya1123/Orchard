@@ -23,8 +23,7 @@ final class SelectionResolverTests: XCTestCase {
         )
         return WorktreeContext(
             project: project,
-            gitInfo: GitInfo(rootURL: root, branchName: branch),
-            terminalContexts: []
+            gitInfo: GitInfo(rootURL: root, branchName: branch)
         )
     }
 

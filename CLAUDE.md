@@ -2,41 +2,7 @@
 
 User-facing documentation lives in `README.md` (English) and `README.ja.md` (Japanese). This file holds internal behavior details and guidance for coding agents.
 
-Orchard is intentionally repository-agnostic: CLI usage automatically registers repositories; users can also configure directories, and Orchard discovers Xcode projects and git worktrees inside those directories. Do not add assumptions tied to any specific repository.
-
-## Current Product Behavior
-
-- Runs as a `MenuBarExtra` app.
-- Automatically registers projects used by `run`, `list schemes`, and `simulator ensure`; settings also supports optional manual scan directories.
-- Discovers git repositories and worktrees under configured directories.
-- Lets users choose:
-  - Project: shown as git branch name.
-  - Scheme: loaded from `xcodebuild -list -json`.
-  - Destination: physical devices plus favorite simulators by default.
-- Simulator destinations can be expanded with `Show More Simulators` inside the Destination menu.
-- Simulator favorites are stored in `UserDefaults`.
-- Project/scheme/destination are presented as a single grouped "form card" of menu rows (icon + label + value + chevron), with a prominent full-width `Build & Run` button below it.
-- `Build & Run` builds, installs, and launches the selected scheme.
-- Multiple jobs can be shown in the Runs section.
-- Jobs for the same project (worktree) are grouped: collapsed groups render as a z-stacked pile of cards with a `square.stack` count badge. Tapping the pile (or the badge) expands the group into a row of cards; the badge or the trailing `chevron.compact.left` collapse button folds it again. The front card of a collapsed pile is the selected job in that group, falling back to the most recent one.
-- Job cards layer an opaque `windowBackgroundColor` base under their tint, and dimmed back cards in a pile are dimmed with an opaque overlay (not `.opacity`), so stacked card content never bleeds through in the vibrant menu bar window.
-- A global keyboard shortcut can be recorded in Settings. Pressing it from any app opens/toggles the Orchard menu bar window. It is registered with Carbon `RegisterEventHotKey` (no accessibility permission needed) and stored in `UserDefaults` (`globalHotKey`).
-- Only one job is kept for each destination. Starting another job for the same destination stops/removes the previous one.
-- Each run item owns its own `Stop`, `Rerun`, and `Close` buttons.
-- The selected run item controls the displayed console log.
-- The log view is intended to show app console output, not Orchard's own build/install command output.
-- Orchard's own diagnostics live in a separate Console screen, opened with the `terminal` icon left of the gear icon. It shows timestamped job lifecycle events (start/stop/fail with error messages) and the raw build/install command output (`xcodebuild`, `simctl`, `devicectl`), kept in memory (`appLogText`, capped at 200k chars) with its own search/copy/clear.
-
-## Run State UI
-
-Each job item has a fixed-height status row.
-
-- While build/install work is in progress, it shows a spinner and text such as `Building`, `Resolving build product`, `Booting simulator`, `Installing`, or `Waiting for device unlock`.
-- Once the app has launched and Orchard is only attached to console output, the progress row no longer shows a spinner.
-- A launched app still counts as a running job because `Stop` should terminate it like Xcode's Stop button.
-- In that state the UI shows `checkmark.circle + Succeeded`.
-- Stopped jobs show `stop.circle + Stopped`.
-- Failed jobs show `xmark.circle + Failed`.
+Orchard is a command-line tool. It is intentionally repository-agnostic: usage automatically registers repositories, and Orchard discovers Xcode projects and git worktrees inside them. Do not add assumptions tied to any specific repository.
 
 ## Build And Run Details
 
@@ -56,77 +22,52 @@ Builds are handled by `BuildRunService`.
 - Device install/launch:
   - `xcrun devicectl device --quiet install app --device <id> <app>`
   - `xcrun devicectl device --quiet process launch --device <id> --terminate-existing --console <bundle id>`
-  - A locked device is not a failure: `DeviceLockDetector` classifies the command's output tail, and install/launch retry every 3 seconds (indefinitely) while showing `Waiting for device unlock`. Stop, Ctrl-C, and `--timeout` are the ways out.
+  - A locked device is not a failure: `DeviceLockDetector` classifies the command's output tail, and install/launch retry every 3 seconds (indefinitely) while reporting `Waiting for device unlock`. `orchard stop`, Ctrl-C, and `--timeout` are the ways out.
 - Stop:
   - Always terminates the launched app, not only the local build process.
   - Simulator stop uses `simctl terminate`.
   - Device stop resolves the installed app URL and running process IDs through `devicectl device info apps/processes`, then terminates matching processes.
 
-`--console` keeps the launch process attached after the app starts. This is why the job can remain `running` after the build is already done.
+`--console` keeps the launch process attached after the app starts. This is why a run stays `running` after the build is already done.
 
-## CLI Internals
+## Run Lifecycle
 
-See `README.md` for the user-facing CLI reference. Internal details:
+See `README.md` for the user-facing reference. Internal details:
 
-- By default `run` runs attached: the CLI resolves the worktree/scheme/destination, builds and launches in-process, streams the app's console to stdout, and blocks until the app exits. The logs are also recorded to the shared run store, so the Orchard app sees this run and can show its logs, rerun it, or stop it. Meant to be launched as a background task (the agent isn't blocked, but the launched app's lifetime is tied to the CLI process).
-- `--delegate` hands the run to the Orchard app: the CLI writes a request, makes sure the app is running, and returns immediately. The GUI then builds/launches the run in-process, holds the console, records the logs, and shows it in the Runs list — the launched app's lifetime is tied to the long-running GUI. Exit code reflects delegation (`0` delegated, `2` not found, `3` ambiguous).
-- Exit code `0` also covers a stop initiated from the GUI (stop / rerun / supersede send `SIGTERM`; the run tears the app down and exits cleanly as `stopped`, so a background task doesn't see it as a crash).
-- Runs are shared both ways through the run store (`~/Library/Application Support/Orchard/runs/<id>.json`):
-  - **CLI → GUI**: each `run` writes/updates a `RunRecord` (source `cli`) as it progresses; the menu bar app watches the store with FSEvents (only while the menu is open — no idle polling) and mirrors CLI runs into its Runs list. The CLI stays terminal-complete, so `run` works whether or not the GUI is open. A CLI run records its PID, so the GUI's Stop button signals it (SIGINT); the CLI then tears down the app, writes `stopped`, and exits 130. Rerun from the GUI cancels the CLI run and restarts it as a GUI-managed run.
-  - **GUI → CLI**: GUI runs (including reruns) also write records (source `gui`), so an agent can read them with `orchard runs` / `orchard runs <id> --log`.
-- One run per destination: starting a run (CLI or GUI) on a destination replaces any existing run there. Jobs whose worktree/branch was deleted from disk are dropped when the menu opens or refreshes. Finished records are pruned after 24h.
-- Directory precedence: `--dir` → `ORCHARD_DIRS` → current project/repository → auto-registered repositories plus manual GUI directories. Shared GUI defaults use `dev.codex.Orchard` even for bare CLI binaries.
-- `RepositoryRegistry` uses canonical Git common-directory identity, relative project locations, atomic per-repository records and process locks. Registration happens before scheme/build/Simulator work and has no opt-out. `list branches`/destinations/runs remain read-only. Discovery metadata must not replace artifact ownership history.
-- The GUI watches `Repositories-v1/repositories` with FSEvents, loads/scans outside MainActor and coalesces refreshes. Identical registration does not rewrite files. CLI projects bypass required onboarding; manual directory addition remains optional.
+- By default `run` runs attached: it resolves the worktree/scheme/destination, builds and launches in-process, streams the app's console to stdout, and blocks until the app exits.
+- `--delegate` resolves (and prepares a `--branch-simulator` destination) in the calling process, then re-executes the same arguments plus hidden `--run-id <id> --quiet` as a new session (`posix_spawn` + `POSIX_SPAWN_SETSID`, stdio on `/dev/null`) and returns once that run's record exists. The run therefore survives the calling shell or agent task. Exit code reflects delegation (`0` delegated, `2` not found, `3` ambiguous, `4` the child did not start).
+- Every run writes a `RunRecord` to `~/Library/Application Support/Orchard/runs/<id>.json` with the owning PID. `orchard runs` reads them; `orchard stop <id>` sends `SIGTERM` to the owner and waits for it to exit.
+- `SIGTERM` (from `stop` or a superseding run) tears down the launched app and exits `0` as `stopped`, so a background task does not see a crash. `SIGINT` does the same teardown and exits `130`.
+- One run per destination: starting a run on a destination stops and removes any existing run there.
+- `runs` marks `running` records whose owner process is gone as `stopped`, prunes finished records after 24h, and drops records whose project file no longer exists.
+- Record state:
+  - Build progress is represented by non-empty `activityText`.
+  - `running` with an empty `activityText` means the app launched and the console is attached. Callers poll for exactly this, so keep it stable.
+- Directory precedence: `--dir` → `ORCHARD_DIRS` → current project/repository → auto-registered repositories plus `configuredDirectoryPaths` from the `dev.codex.Orchard` defaults domain.
+- `RepositoryRegistry` uses canonical Git common-directory identity, relative project locations, atomic per-repository records and process locks. Registration happens before scheme/build/Simulator work and has no opt-out. `list branches`/destinations/runs remain read-only. Discovery metadata must not replace artifact ownership history. Identical registration does not rewrite files.
 
 ## Discovery Model
 
-Worktree discovery is independent of any terminal app.
-
-Main flow:
-
-1. CLI usage registers a project; users may also configure scan directories.
+1. Usage registers a project; `configuredDirectoryPaths` may add scan directories.
 2. `WorktreeContextResolver` merges configured-directory discovery with registered repositories.
 3. It finds git repositories.
 4. For each repository, it runs `git worktree list --porcelain`.
 5. It creates one `WorktreeContext` per worktree.
-6. It discovers `.xcworkspace` or `.xcodeproj`, including relative nested project locations recorded by CLI usage.
+6. It discovers `.xcworkspace` or `.xcodeproj`, including relative nested project locations recorded by usage.
 
-Fallback scanning also checks:
-
-- `.worktrees`
-- `.claude/worktrees`
-
-Terminal integration code still exists (`TerminalContextProvider`, `GhosttyContextProvider`), but the current user-facing flow does not depend on Ghostty.
+Fallback scanning also checks `.worktrees` and `.claude/worktrees`.
 
 ## Source Map
 
-- `Sources/OrchardApp/main.swift`
-  - Process entry point. Dispatches to the GUI (no args) or the headless CLI (subcommand given).
-- `Sources/OrchardApp/OrchardApp.swift`
-  - `MenuBarExtra` app definition (no longer `@main`; launched from `main.swift`).
-- `Sources/OrchardApp/CLI/`
+- `Sources/OrchardCLI/`
+  - `main.swift`: entry point.
   - `OrchardCLI.swift`: root command, shared `--dir`/`--json` options, concrete-type dispatch (`runOrchardCLI`).
   - `RunCommand.swift`: `run` subcommand and exit-code mapping.
+  - `RunsCommand.swift` / `StopCommand.swift`: follow and stop runs through the run store.
   - `ListCommand.swift`: `list branches|schemes|destinations`.
-  - `CLIEnvironment.swift`: directory resolution, fetching, build-log wiring, Ctrl-C/timeout handling, NDJSON events.
-- `Sources/OrchardApp/RunnerMenuView.swift`
-  - Menu bar UI.
-  - Project/scheme/destination controls.
-  - Destination menu, simulator favorite/show more UI.
-  - Runs section, per-job action buttons, status rows, log view.
-- `Sources/OrchardApp/RunnerViewModel.swift`
-  - UI state and orchestration.
-  - Stores scan directories, simulator favorites, and the global hot key in `UserDefaults`.
-  - Starts/stops/reruns/closes jobs.
-  - Groups jobs by project (`jobGroups`) for the stacked Runs UI.
-  - Enforces one job per destination.
-- `Sources/OrchardApp/GlobalHotKey.swift`
-  - `GlobalHotKey` model (key code, Carbon modifiers, display string).
-  - `GlobalHotKeyManager` wrapping Carbon `RegisterEventHotKey`.
-  - `MenuBarWindowPresenter`, which opens the `MenuBarExtra` window by clicking the status item button (KVC on `NSStatusBarWindow`, since there is no public API).
-- `Sources/OrchardApp/ShortcutRecorderField.swift`
-  - Settings control that records a shortcut via a local `keyDown` event monitor. Esc cancels; a cmd/opt/ctrl modifier is required.
+  - `SimulatorCommand.swift`: `simulator base|ensure`.
+  - `CleanupCommand.swift`: `cleanup` and the hidden `cleanup-worker`.
+  - `CLIEnvironment.swift`: directory resolution, fetching, delegation, build-log wiring, signal/timeout handling, NDJSON events, run records.
 - `Sources/OrchardCore/WorktreeContext.swift`
   - Worktree and configured-directory discovery.
 - `Sources/OrchardCore/ProjectDetector.swift`
@@ -144,52 +85,28 @@ Terminal integration code still exists (`TerminalContextProvider`, `GhosttyConte
 - `Sources/OrchardCore/XcodeModels.swift`
   - Shared model types.
 - `Sources/OrchardCore/SelectionResolver.swift`
-  - Resolves human-readable branch/scheme/destination names to model objects (staged fuzzy matching). Shared by the CLI.
+  - Resolves human-readable branch/scheme/destination names to model objects (staged fuzzy matching).
 - `Sources/OrchardCore/AppConfiguration.swift`
-  - UserDefaults suite name and key constants shared by the GUI and CLI.
+  - Defaults domain and keys.
 - `Sources/OrchardCore/RunRecord.swift` / `RunStore.swift`
-  - Serializable run snapshot and the shared on-disk store (`Application Support/Orchard/runs/`) the CLI writes and the GUI polls, so CLI runs show in the Runs list.
-- `Scripts/package-app.sh`
-  - Builds and packages `Orchard.app`.
+  - Serializable run snapshot and the on-disk store (`Application Support/Orchard/runs/`).
+- `Scripts/install.sh`
+  - Builds a release binary and installs it as `~/.local/bin/orchard` (override with `ORCHARD_INSTALL_DIR`).
 
 ## Development Commands
 
-Run tests:
-
 ```bash
 swift test
+Scripts/install.sh
 ```
 
-Build app bundle:
-
-```bash
-Scripts/package-app.sh
-```
-
-Open packaged app:
-
-```bash
-open Orchard.app
-```
-
-Restart the currently running app:
-
-```bash
-kill $(pgrep -f '/Orchard.app/Contents/MacOS/orchard')
-open Orchard.app
-```
+Install by rename so running delegated runs keep their old binary.
 
 ## Notes For Future Agents
 
 - Keep Orchard generic. Do not add repository-specific assumptions.
-- Prefer configured directory scanning over terminal/window introspection.
-- Do not put build/install command output in the Log view unless the product direction changes. The Log view is for app console output.
-- Be careful with job status:
-  - `running` currently means the app is launched or Orchard is still attached to console output.
-  - Build progress is represented by non-empty `activityText`.
-  - Empty `activityText` with a running job means the app launched successfully and progress UI should be hidden.
 - If changing build performance behavior, remember that omitting `-derivedDataPath` is intentional to share standard Xcode DerivedData.
-- After UI changes, run `swift test`, then `Scripts/package-app.sh`, then restart `Orchard.app`.
+- After changes, run `swift test`, then `Scripts/install.sh`.
 
 ## Simulator base ownership
 
@@ -202,6 +119,7 @@ open Orchard.app
 ## Background artifact collection
 
 - `ArtifactActivity` records worktree ownership and holds shared process leases through build/install. Release before console attachment; console lifetime must not pin an orphan Simulator.
-- `ArtifactCleanup` deletes only attributable DerivedData and named branch Simulators when the owner directory is absent or the latest activity is seven days old. Never infer simulator ownership from a branch-shaped name. Standard devices/private bases, exclusions and modified package checkouts remain protected.
+- `ArtifactCleanup` deletes only attributable DerivedData and named branch Simulators when the owner directory is absent or the latest activity is old enough. Never infer simulator ownership from a branch-shaped name. Standard devices/private bases, exclusions and modified package checkouts remain protected.
+- Before deleting a Shutdown Simulator, processes still running from its data directory are orphans (no `launchd_sim`); they are terminated, and the device is preserved if any survive.
 - `cleanup-worker` is a hidden CLI entry point spawned independently at background CPU/I/O priority. Its exclusive worker lock prevents overlaps; per-project/device exclusive try-locks skip active operations. DerivedData is moved aside under the lock before slow deletion.
-- Keep all filesystem scans and deletion out of `MainActor`. Do not add periodic GUI timers or mutate existing worktrees. Test cleanup with injected paths and simulated commands.
+- Test cleanup with injected paths and simulated commands.

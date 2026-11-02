@@ -2,13 +2,12 @@ import ArgumentParser
 import OrchardCore
 import Foundation
 
-/// Lets an agent read every run — GUI- or CLI-originated — from the shared run
-/// store: list them, or print one run's log. This is how runs started or rerun
-/// from the GUI become observable on the command line.
+/// Lets another shell follow runs, including delegated ones whose output goes
+/// nowhere else: list them, or print one run's log.
 struct RunsCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "runs",
-        abstract: "List runs (GUI and CLI), or print one run's log."
+        abstract: "List runs, or print one run's log."
     )
 
     @Argument(help: "Run id (or unique prefix) to show in detail. Omit to list all runs.")
@@ -22,6 +21,8 @@ struct RunsCommand: AsyncParsableCommand {
 
     func run() async throws {
         RunStore.shared.pruneOrphaned()
+        RunStore.shared.finishAbandoned()
+        RunStore.shared.pruneFinished(olderThan: 24 * 60 * 60, now: Date().timeIntervalSince1970)
         let records = RunStore.shared.loadAll().sorted { $0.startedAt > $1.startedAt }
 
         if let id {

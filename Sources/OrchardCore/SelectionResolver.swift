@@ -22,7 +22,7 @@ public enum SelectionError: Error, CustomStringConvertible {
 /// Resolves the human-readable names an agent or user would type (a branch
 /// name, a scheme name, a simulator name) into the concrete model objects the
 /// build pipeline needs. Pure functions over already-fetched lists so they are
-/// trivially testable and reusable from both the CLI and the GUI.
+/// trivially testable.
 public enum SelectionResolver {
     public static func resolveWorktree(
         name: String,

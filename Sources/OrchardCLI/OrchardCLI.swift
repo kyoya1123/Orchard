@@ -1,15 +1,13 @@
 import ArgumentParser
 import OrchardCore
 
-/// Root of the headless CLI. Mirrors what the menu bar UI does — pick a branch
-/// (worktree), a scheme, and a destination, then build/install/launch — so an
-/// agent can drive a run from the terminal.
 @available(macOS 10.15, *)
 struct OrchardCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "orchard",
-        abstract: "Build and run iOS apps from a worktree/scheme/destination, the same flow as the Orchard menu bar app.",
-        subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self, SimulatorCommand.self, CleanupCommand.self, CleanupWorker.self]
+        abstract: "Build and run iOS apps from a worktree/scheme/destination.",
+        subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self, StopCommand.self, SimulatorCommand.self,
+                      CleanupCommand.self, CleanupWorker.self]
     )
 }
 
@@ -51,6 +49,8 @@ func runOrchardCLI(_ arguments: [String]) async {
         case var command as ListDestinations:
             try await command.run()
         case var command as RunsCommand:
+            try await command.run()
+        case var command as StopCommand:
             try await command.run()
         case var command as SimulatorEnsure:
             try await command.run()

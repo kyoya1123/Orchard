@@ -4,7 +4,7 @@ import Foundation
 
 /// Shares immutable SPM snapshots with APFS clones, never writable checkouts.
 /// DerivedData remains under Xcode's control. A lease covers each xcodebuild
-/// operation so GUI and CLI commands for the same project cannot race here.
+/// operation so concurrent commands for the same project cannot race here.
 public struct SourcePackageCache: Sendable {
     let root: URL
     let derivedDataRoot: URL
