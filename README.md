@@ -23,7 +23,7 @@ Orchard reuses the project's existing `DerivedData/SourcePackages` when present.
 
 Scheme listing, builds and build-product lookup use the same package directory. Commands for the same project are serialized across the GUI and CLI until build-product lookup finishes; different worktrees can still build concurrently. The normal DerivedData build location remains unchanged. A successful resolution/build publishes a template only when the pinned Git checkouts are clean and artifact paths are self-contained. Local/registry packages and unsupported lockfile formats use normal Xcode behavior. Failed clones fall back to Xcode resolution, never a full copy.
 
-This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. This SPM sharing service never deletes existing package directories or per-worktree edits. The separate background collector described below can remove expired DerivedData, but preserves modified package checkouts. To opt out, launch Orchard/its CLI with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
+This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. The SPM sharing service does not delete per-worktree checkouts while building. Managed caches record their owner and pinned dependency revisions. The separate collector below can reclaim a cache only after its recorded worktree disappears and its pinned checkouts remain unchanged. Legacy entries without a receipt, live-worktree caches, templates and manual dependency edits remain protected. To opt out, launch Orchard/its CLI with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
 
 ## Empty Simulator bases
 
@@ -54,12 +54,25 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 
 Orchard checks for unused artifacts when the app starts, when preparing a branch Simulator, and around package/build operations. Collection runs in a separate background process with low CPU and disk I/O priority. It never waits on the UI thread, and a process lock coalesces overlapping requests.
 
-- An owned branch Simulator or DerivedData directory is eligible when its recorded worktree directory no longer exists, or when it has been unused for **seven days**. Discovery does not reset the retention clock.
-- Eligible booted Simulators are shut down and deleted, including Simulators whose worktree has disappeared. Standard-name devices, private bases, renamed devices and devices without an established owner are preserved.
-- Orchard builds, Simulator preparation and installation hold process-shared leases. A collector skips busy artifacts. Console attachment alone does not pin an orphan Simulator indefinitely. DerivedData collection also defers during external `xcodebuild` activity, when an Xcode build service has that directory open, or when a package checkout contains local changes.
+- An owned branch Simulator is eligible when its recorded worktree disappears, or its latest CoreSimulator/Orchard usage timestamp is **more than one day old**. Filesystem modification times never establish Simulator use. Unknown timestamps do not satisfy the age rule. Discovery does not reset the retention clock.
+- A stopped branch Simulator can also be reclaimed when every live owner is a clean non-default branch whose HEAD is an ancestor of the locally cached `origin/HEAD` target. The normalized branch name must still match the Simulator, protecting worktrees reused for a different branch. This is local ancestry evidence, not a fresh GitHub PR check: no fetch/prune, network requests or Git writes occur; squash merges may remain unrecognized.
+- DerivedData retains the existing **seven-day** or missing-worktree policy.
+- Booted or transitioning Simulators are always preserved, including orphans. Cleanup never shuts down a session. Standard-name devices, private bases, renamed devices and devices without an established owner are preserved.
+- Orchard builds, Simulator preparation and installation hold process-shared leases. A collector skips busy artifacts. External builds and open files/working directories under the owning worktree or Simulator also preserve the device. A dormant shell or attached console may conservatively defer collection. State and usage are rechecked before each deletion. DerivedData collection also defers during external `xcodebuild` activity, when an Xcode build service has that directory open, or when a package checkout contains local changes.
 - Worktree directories, branches and source files are never deleted. Ownership comes from recorded project paths and configured repositories, including registered external/Codex worktrees. A missing external worktree needs a previously recorded association; names alone are not ownership proof.
 
-Inspect with `orchard cleanup --json`; this does not stop Simulators or delete artifacts. Use `orchard cleanup --apply` for an explicit collection. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
+Inspect with `orchard cleanup --json`; this does not stop Simulators or delete artifacts. Reports include exact device IDs, names, usage timestamps, candidate sizes and removal/preservation reasons. Size estimates can double-count APFS shared blocks; measure actual free space separately. Inspection may update ownership/report metadata and lock files. Use `orchard cleanup --apply` for an explicit collection; Simulator deletion permanently removes installed apps and in-device data.
+
+Limit inspection and application with `--scope simulators`, `--scope derived-data`, or `--scope source-packages` (default: `all`). `--no-discover` uses existing ownership records. For example:
+
+```sh
+orchard cleanup --scope simulators --no-discover
+orchard cleanup --scope simulators --no-discover --apply
+```
+
+Managed SourcePackages entries need a matching owner receipt and a known project record. Only a missing worktree with clean, pinned dependencies and no busy build/cache lease is eligible. Extra files/checkouts, local commits, ignored/untracked files, local/edited dependencies, unknown ownership or inspection errors preserve the entry. Existing caches acquire a receipt the next time this version of Orchard uses them. Templates and live-worktree caches are retained.
+
+Go, Gradle, npm, DeviceSupport and Simulator runtimes are outside this collector's scope. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
 
 ## Requirements
 

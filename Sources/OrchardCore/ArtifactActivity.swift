@@ -108,7 +108,7 @@ final class ArtifactLease: @unchecked Sendable {
 }
 
 public final class ArtifactActivity: @unchecked Sendable {
-    private let owner: ArtifactOwner
+    let owner: ArtifactOwner
     private let store: ArtifactStore
     private var leases: [ArtifactLease]
 
