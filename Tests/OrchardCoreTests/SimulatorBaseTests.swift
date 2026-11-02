@@ -41,6 +41,31 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try catalog.resolve(.init(runtime: "iOS 28.0")))
     }
 
+    func testLatestIgnoresModelSpecificRuntimeUnlessRequested() throws {
+        let json = """
+        {"devicetypes": [
+          {"name": "iPhone 18 Pro", "identifier": "type18", "modelIdentifier": "iPhone19,2"},
+          {"name": "iPhone 18 Pro Max", "identifier": "type18max", "modelIdentifier": "iPhone19,3"},
+          {"name": "iPhone Duo", "identifier": "duo", "modelIdentifier": "iPhone19,4"}
+        ], "runtimes": [
+          {"name": "iOS 27.2", "identifier": "com.apple.iOS-27-2", "version": "27.2", "buildversion": "24B8117",
+           "isAvailable": true, "supportedDeviceTypes": [{"identifier": "type18"}, {"identifier": "type18max"}]},
+          {"name": "iOS 27.2", "identifier": "com.apple.iOS-27-2-iPhone19-4", "version": "27.2", "buildversion": "24B91016s",
+           "isAvailable": true, "supportedDeviceTypes": [{"identifier": "duo"}]},
+          {"name": "iOS 27.3", "identifier": "com.apple.iOS-27-3", "version": "27.3", "buildversion": "24C1",
+           "isAvailable": true, "supportedDeviceTypes": [{"identifier": "duo"}]}
+        ], "devices": {}}
+        """
+        let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(json.utf8))
+        let (device, runtime) = try catalog.resolve(.init())
+        XCTAssertEqual(device.name, "iPhone 18 Pro")
+        XCTAssertEqual(runtime.identifier, "com.apple.iOS-27-2")
+        XCTAssertEqual(try catalog.resolve(.init(runtime: "iOS 27.2")).0.name, "iPhone 18 Pro")
+        let (duo, duoRuntime) = try catalog.resolve(.init(deviceType: "iPhone Duo"))
+        XCTAssertEqual(duo.name, "iPhone Duo")
+        XCTAssertEqual(duoRuntime.identifier, "com.apple.iOS-27-3")
+    }
+
     func testNewBaseOnlyBootsAndShutsDownBeforeCloning() async throws {
         let (service, fake, _) = try fixture()
         let result = try await service.prepare(name: "feature-one")
