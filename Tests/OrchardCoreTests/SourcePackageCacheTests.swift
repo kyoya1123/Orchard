@@ -53,6 +53,74 @@ final class SourcePackageCacheTests: XCTestCase, @unchecked Sendable {
                      projectLock: root.appendingPathComponent("project.lock"))
     }
 
+    func testManagedCacheRecordsOwnershipAndPinsUnderItsLease() async throws {
+        let root = try temporaryDirectory()
+        let owner = ArtifactOwner(projectPath: root.appendingPathComponent("worktree/App.xcodeproj").path,
+                                  worktreePath: root.appendingPathComponent("worktree").path, repositoryPath: root.path)
+        let directory = root.appendingPathComponent("cache/worktrees/\(ArtifactStore.key(owner.projectPath))")
+        let fixture = try await fixture(at: directory)
+        let context = try context(at: root, packages: fixture.packages, resolved: fixture.resolved)
+        let cache = SourcePackageCache(root: root.appendingPathComponent("cache"), derivedDataRoot: root)
+        _ = try await cache.withCache(context: context, owner: owner) { _ in "done" }
+        let receipt = try XCTUnwrap(ArtifactStore().read(SourcePackageOwnership.self, at: directory.appendingPathComponent("owner.json")))
+        XCTAssertEqual(receipt.owner, owner)
+        XCTAssertEqual(receipt.resolved, fixture.resolved)
+        XCTAssertEqual(receipt.repositoryCacheID, "cache")
+    }
+
+    func testOrphanPackageCleanupRequiresUnmodifiedPinsAndPreservesTemplates() async throws {
+        for variant in ["clean", "dirty", "local-commit", "extra-file", "extra-checkout", "busy", "live"] {
+            let root = try temporaryDirectory()
+            let owner = ArtifactOwner(projectPath: root.appendingPathComponent("worktree/App.xcodeproj").path,
+                                      worktreePath: root.appendingPathComponent("worktree").path, repositoryPath: root.path)
+            let store = ArtifactStore(root: root.appendingPathComponent("state"))
+            try store.write(ArtifactProject(owner: owner, lastUsedAt: 0), to: store.projectURL(owner.projectPath))
+            let cacheRoot = root.appendingPathComponent("packages")
+            let repository = cacheRoot.appendingPathComponent("repo")
+            let directory = repository.appendingPathComponent("worktrees/\(ArtifactStore.key(owner.projectPath))")
+            let fixture = try await fixture(at: directory)
+            try store.write(SourcePackageOwnership(owner: owner, repositoryCacheID: "repo", resolved: fixture.resolved),
+                            to: directory.appendingPathComponent("owner.json"))
+            let template = repository.appendingPathComponent("templates/keep/file")
+            try write("keep", at: template)
+            let checkout = fixture.packages.appendingPathComponent("checkouts/package")
+            var lease: ArtifactLease?
+            switch variant {
+            case "dirty", "local-commit":
+                try write("manual edit", at: checkout.appendingPathComponent("Source.swift"))
+                if variant == "local-commit" {
+                    _ = try await git(["add", "."], at: checkout)
+                    _ = try await git(["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                       "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "local"], at: checkout)
+                }
+            case "extra-file": try write("saved data", at: fixture.packages.appendingPathComponent("notes.txt"))
+            case "extra-checkout": try write("saved data", at: fixture.packages.appendingPathComponent("checkouts/unrecorded/notes.txt"))
+            case "busy": lease = try ArtifactLease.tryAcquire(repository.appendingPathComponent("locks/\(ArtifactStore.key(owner.projectPath)).lock"))
+            case "live": try FileManager.default.createDirectory(atPath: owner.worktreePath, withIntermediateDirectories: true)
+            default: break
+            }
+            defer { lease?.close() }
+            let worker = ArtifactCleanup(store: store, derivedData: root.appendingPathComponent("DD"),
+                                         devices: root.appendingPathComponent("Devices"), sourcePackages: cacheRoot,
+                                         command: { tool, args in
+                if tool == "/usr/bin/git" {
+                    return try await ProcessRunner.run(executableURL: URL(fileURLWithPath: tool), arguments: args, currentDirectoryURL: nil)
+                }
+                if tool == "/bin/ps" || tool == "/usr/sbin/lsof" { return "" }
+                throw OrchardError.message("Unexpected cleanup command")
+            })
+            let preview = await worker.run(apply: false, discover: false, scope: .sourcePackages)
+            XCTAssertNil(preview.error, variant)
+            XCTAssertEqual(preview.actions.first?.outcome, variant == "clean" ? "would-remove" : "preserved", "\(variant): \(preview.actions.map(\.reason))")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+            let result = await worker.run(apply: true, discover: false, scope: .sourcePackages)
+            XCTAssertNil(result.error, variant)
+            XCTAssertEqual(result.actions.first?.outcome, variant == "clean" ? "removed" : "preserved", "\(variant): \(result.actions.map(\.reason))")
+            XCTAssertEqual(FileManager.default.fileExists(atPath: directory.path), variant != "clean", variant)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: template.path), variant)
+        }
+    }
+
     func testKeyChangesWithPinsAndToolchain() {
         let data = Data("lockfile".utf8)
         let key = SourcePackageCache.cacheKey(resolved: data, toolchain: "Xcode A")
