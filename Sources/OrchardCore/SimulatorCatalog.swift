@@ -28,6 +28,8 @@ struct SimulatorCatalog: Decodable, Sendable {
         let buildversion: String
         let isAvailable: Bool
         let supportedDeviceTypes: [SupportedDevice]?
+
+        var isModelSpecific: Bool { (supportedDeviceTypes?.count ?? .max) <= 1 }
     }
 
     struct Device: Decodable, Sendable {
@@ -50,7 +52,13 @@ struct SimulatorCatalog: Decodable, Sendable {
             if $0.version != $1.version { return Self.numbers($1.version).lexicographicallyPrecedes(Self.numbers($0.version)) }
             return $1.buildversion.localizedStandardCompare($0.buildversion) == .orderedAscending
         }
-        for runtime in runtimes {
+        // A runtime shipped for a single new model (e.g. iOS-27-2-iPhone19-4
+        // for iPhone Duo) can outrank the general runtime by version or build.
+        // Automatic selection must not let it decide the default phone.
+        let ordered = selection.deviceType == "latest"
+            ? runtimes.filter { !$0.isModelSpecific } + runtimes.filter(\.isModelSpecific)
+            : runtimes
+        for runtime in ordered {
             let version = Self.numbers(runtime.version)
             let encodedVersion = UInt64((version.first ?? 0) << 16 | (version.dropFirst().first ?? 0) << 8 | (version.dropFirst(2).first ?? 0))
             let compatible = devicetypes.filter { device in
