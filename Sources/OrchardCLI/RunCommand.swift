@@ -34,8 +34,11 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Stop the run after this many seconds.")
     var timeout: Int?
 
-    @Flag(name: .long, help: "Hand the run to the Orchard app instead of running it here (returns immediately; the GUI builds/launches and shows the logs).")
+    @Flag(name: .long, help: "Run in a detached background process and return immediately with the run id (follow it with `orchard runs`).")
     var delegate = false
+
+    @Option(name: .long, help: .hidden)
+    var runID: String?
 
     @Flag(name: .long, help: "Suppress app console output on stdout (still recorded to the run store).")
     var quiet = false
@@ -65,21 +68,17 @@ struct RunCommand: AsyncParsableCommand {
 
         do {
             if delegate {
-                // Opt-in: hand the run to the GUI app and return immediately.
                 let run = try await env.delegateRun(
                     branch: branch,
                     scheme: scheme,
                     destination: destination ?? "",
                     kindFilter: kindFilter,
-                    simulatorSelection: selection
+                    simulatorSelection: selection,
+                    arguments: Array(CommandLine.arguments.dropFirst())
                 )
                 env.emitProgress("Delegated to Orchard: \(run.worktree.branchName) · \(run.scheme) · \(run.destination.displayName) · run \(run.id)")
                 env.emitResult(status: "delegated", exitCode: 0)
             } else {
-                // Default: build/run attached here, streaming console. Logs are
-                // recorded to the shared store, so the Orchard app shows this run
-                // and can view its logs, rerun, or stop it. Meant to be launched
-                // as a background task.
                 try await env.performRun(
                     branch: branch,
                     scheme: scheme,
@@ -87,7 +86,8 @@ struct RunCommand: AsyncParsableCommand {
                     kindFilter: kindFilter,
                     timeout: timeout,
                     detached: false,
-                    simulatorSelection: selection
+                    simulatorSelection: selection,
+                    runID: runID
                 )
             }
         } catch let error as SelectionError {

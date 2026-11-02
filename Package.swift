@@ -8,14 +8,14 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "orchard", targets: ["OrchardApp"])
+        .executable(name: "orchard", targets: ["OrchardCLI"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [
         .executableTarget(
-            name: "OrchardApp",
+            name: "OrchardCLI",
             dependencies: [
                 "OrchardCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")

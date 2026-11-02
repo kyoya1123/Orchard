@@ -1,9 +1,7 @@
 import Foundation
 
-/// A serialized snapshot of a run, written by the CLI to a shared on-disk store
-/// so the GUI can display CLI-originated runs in its Runs list. The CLI keeps
-/// running the build itself (terminal-complete, logs/exit code on stdout); this
-/// record is a side-channel purely for GUI visibility.
+/// A serialized snapshot of a run, written by the owning `orchard run` process
+/// so other shells can follow (`orchard runs`) or stop (`orchard stop`) it.
 public struct RunRecord: Codable, Identifiable, Sendable {
     public enum Status: String, Codable, Sendable {
         case running
@@ -64,8 +62,8 @@ public struct RunRecord: Codable, Identifiable, Sendable {
     public var status: Status
     public var activityText: String
     public var log: String
-    /// PID of the CLI process that owns this run, so the GUI can stop it by
-    /// sending SIGINT. Optional for backward compatibility with older records.
+    /// PID of the process that owns this run, which `orchard stop` and a
+    /// superseding run signal. Optional for backward compatibility with older records.
     public var pid: Int32?
 
     public init(

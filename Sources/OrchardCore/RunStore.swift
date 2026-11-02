@@ -1,10 +1,8 @@
 import Foundation
 
-/// File-based store for `RunRecord`s shared between the CLI and the GUI. Each
-/// run is one `<id>.json` file under
-/// `~/Library/Application Support/Orchard/runs/`. The CLI writes/updates its
-/// file as a run progresses; the GUI polls `loadAll()` to mirror those runs in
-/// its Runs list. Both processes resolve the same user-domain path.
+/// File-based store for `RunRecord`s. Each run is one `<id>.json` file under
+/// `~/Library/Application Support/Orchard/runs/`, written by the process that
+/// owns the run and read by `orchard runs` / `orchard stop` from any shell.
 public struct RunStore: Sendable {
     public static let shared = RunStore()
 
@@ -20,14 +18,6 @@ public struct RunStore: Sendable {
 
     private func ensureDirectory() throws {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-    }
-
-    /// Creates the store directory if needed and returns it. Useful for setting
-    /// up a filesystem watcher that requires the path to exist.
-    @discardableResult
-    public func prepareDirectory() -> URL {
-        try? ensureDirectory()
-        return directoryURL
     }
 
     private func fileURL(for id: String) -> URL {
@@ -64,41 +54,14 @@ public struct RunStore: Sendable {
         try? FileManager.default.removeItem(at: fileURL(for: id))
     }
 
-    // MARK: - Run requests (CLI → GUI delegation)
-
-    public var requestsDirectoryURL: URL {
-        directoryURL.deletingLastPathComponent().appendingPathComponent("requests", isDirectory: true)
-    }
-
-    @discardableResult
-    public func prepareRequestsDirectory() -> URL {
-        try? FileManager.default.createDirectory(at: requestsDirectoryURL, withIntermediateDirectories: true)
-        return requestsDirectoryURL
-    }
-
-    public func writeRequest(_ payload: RunRequestPayload) throws {
-        prepareRequestsDirectory()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
-        let data = try encoder.encode(payload)
-        try data.write(to: requestsDirectoryURL.appendingPathComponent("\(payload.id).json"), options: .atomic)
-    }
-
-    public func loadRequests() -> [RunRequestPayload] {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: requestsDirectoryURL,
-            includingPropertiesForKeys: nil
-        ) else {
-            return []
+    /// Marks `running` records whose owning process is gone as `stopped`, so a
+    /// run whose process crashed or was killed does not look alive forever.
+    public func finishAbandoned(isAlive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }) {
+        for var record in loadAll() where record.status == .running && !(record.pid.map(isAlive) ?? false) {
+            record.status = .stopped
+            record.activityText = "Owning process exited"
+            try? write(record)
         }
-        let decoder = JSONDecoder()
-        return urls
-            .filter { $0.pathExtension == "json" }
-            .compactMap { url in (try? Data(contentsOf: url)).flatMap { try? decoder.decode(RunRequestPayload.self, from: $0) } }
-    }
-
-    public func removeRequest(id: String) {
-        try? FileManager.default.removeItem(at: requestsDirectoryURL.appendingPathComponent("\(id).json"))
     }
 
     /// Deletes finished records whose last update is older than `seconds`.
@@ -111,8 +74,7 @@ public struct RunStore: Sendable {
     }
 
     /// Deletes records whose project file no longer exists on disk — i.e. the
-    /// worktree was deleted. Called on every CLI invocation and GUI sync so
-    /// stale runs never surface anywhere.
+    /// worktree was deleted, so stale runs never surface anywhere.
     public func pruneOrphaned() {
         for record in loadAll() where !FileManager.default.fileExists(atPath: record.projectFilePath) {
             remove(id: record.id)

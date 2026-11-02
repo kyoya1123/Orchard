@@ -13,7 +13,7 @@ struct BuildFailure: Error, CustomStringConvertible {
 
 /// Shared machinery for the `run` and `list` subcommands: resolves which
 /// directories to scan, fetches worktrees/schemes/destinations via the same
-/// `OrchardCore` services the GUI uses, wires build logs to stdout/stderr,
+/// `OrchardCore` services, wires build logs to stdout/stderr,
 /// and manages clean Ctrl-C teardown.
 final class CLIEnvironment: @unchecked Sendable {
     let directoryURLs: [URL]
@@ -29,7 +29,7 @@ final class CLIEnvironment: @unchecked Sendable {
     private let stateLock = NSLock()
     private var service: BuildRunService?
     private var interrupted = false
-    // Set when the GUI (or a superseding run) asks this run to stop via SIGTERM.
+    // Set when `orchard stop` (or a superseding run) asks this run to stop via SIGTERM.
     // Unlike a Ctrl-C interrupt, this is an intentional user action, so the run
     // ends cleanly (exit 0) instead of looking like a crash to a background task.
     private var externallyStopped = false
@@ -41,7 +41,7 @@ final class CLIEnvironment: @unchecked Sendable {
     private var signalSource: DispatchSourceSignal?
     private var termSignalSource: DispatchSourceSignal?
 
-    // Shared run record written for GUI visibility. Guarded by recordLock since
+    // Run record read by `orchard runs` / `orchard stop`. Guarded by recordLock since
     // it is mutated from build callbacks running on arbitrary threads.
     private let recordLock = NSLock()
     private var record: RunRecord?
@@ -138,50 +138,57 @@ final class CLIEnvironment: @unchecked Sendable {
         return (worktree, resolvedScheme, resolvedDestination)
     }
 
-    /// Default run path: hand a resolved request to the GUI app, which runs it
-    /// (console attached, logs recorded and shown) while this command returns
-    /// immediately. Ensures the GUI is running. Returns the request id.
+    /// Resolves here first so selection errors and Simulator preparation are
+    /// reported to the caller, then hands the same arguments to an `orchard run`
+    /// in its own session so the run (and the attached console) outlives the
+    /// calling shell. Returns once the run's record exists, so `orchard runs <id>`
+    /// works immediately.
     func delegateRun(
         branch: String,
         scheme: String,
         destination: String,
         kindFilter: XcodeDestination.Kind?,
-        simulatorSelection: SimulatorSelection? = nil
+        simulatorSelection: SimulatorSelection? = nil,
+        arguments: [String]
     ) async throws -> (id: String, worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
         let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter,
                                           simulatorSelection: simulatorSelection)
 
         let id = UUID().uuidString
-        let payload = RunRequestPayload(
-            id: id,
-            branchName: resolved.worktree.branchName,
-            worktreeDisplayName: resolved.worktree.displayName,
-            project: resolved.worktree.project,
-            scheme: resolved.scheme,
-            destination: resolved.destination
-        )
-        do {
-            try RunStore.shared.writeRequest(payload)
-        } catch {
-            throw BuildFailure(message: "Failed to write run request: \(error)")
+        let pid = try Self.spawnDetached(arguments.filter { $0 != "--delegate" } + ["--quiet", "--run-id", id])
+        let deadline = Date().addingTimeInterval(120)
+        while RunStore.shared.loadAll().contains(where: { $0.id == id }) == false {
+            guard Date() < deadline, kill(pid, 0) == 0 else {
+                throw BuildFailure(message: "The delegated run (pid \(pid)) did not start.")
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
-        ensureGUIRunning()
         return (id, resolved.worktree, resolved.scheme, resolved.destination)
     }
 
-    /// Launches the Orchard GUI (no-op if already running) so it can pick up
-    /// the delegated request. Derives the .app bundle from this binary's path.
-    private func ensureGUIRunning() {
-        let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments.first ?? "")
-            .resolvingSymlinksInPath()
-        // .../Orchard.app/Contents/MacOS/orchard → .../Orchard.app
-        let appURL = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        guard appURL.pathExtension == "app" else { return }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-g", appURL.path]
-        try? process.run()
-        process.waitUntilExit()
+    private static func spawnDetached(_ arguments: [String]) throws -> pid_t {
+        guard let executable = Bundle.main.executablePath else {
+            throw BuildFailure(message: "Cannot locate the orchard executable.")
+        }
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+
+        let argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) } + [nil]
+        defer { argv.forEach { free($0) } }
+        var pid: pid_t = 0
+        let status = posix_spawn(&pid, executable, &actions, &attributes, argv, environ)
+        guard status == 0 else {
+            throw BuildFailure(message: "Failed to start the delegated run: \(String(cString: strerror(status)))")
+        }
+        return pid
     }
 
     // MARK: - Run (attached; the default, recorded to the shared store)
@@ -193,7 +200,8 @@ final class CLIEnvironment: @unchecked Sendable {
         kindFilter: XcodeDestination.Kind?,
         timeout: Int?,
         detached: Bool,
-        simulatorSelection: SimulatorSelection? = nil
+        simulatorSelection: SimulatorSelection? = nil,
+        runID: String? = nil
     ) async throws {
         let resolved = try await resolveRun(branch: branch, scheme: scheme, destination: destination, kindFilter: kindFilter,
                                           simulatorSelection: simulatorSelection)
@@ -203,10 +211,11 @@ final class CLIEnvironment: @unchecked Sendable {
 
         // One run per destination: cancel and drop any existing run on this same
         // destination so re-running the same branch/scheme/destination replaces
-        // the previous one instead of stacking (mirrors the GUI's behavior).
+        // the previous one instead of stacking.
         await supersedeRuns(onDestination: resolvedDestination.id)
 
         startRecord(
+            id: runID ?? UUID().uuidString,
             worktree: worktree,
             scheme: resolvedScheme,
             destination: resolvedDestination
@@ -248,7 +257,7 @@ final class CLIEnvironment: @unchecked Sendable {
         } catch {
             timeoutTask?.cancel()
 
-            // A GUI-initiated stop (or being superseded) is an intentional user
+            // `orchard stop` (or being superseded) is an intentional user
             // action, not a failure. Tear the launched app down the same way, but
             // finish as a clean `stopped` with exit 0 so a background task running
             // this run doesn't treat it as a crash.
@@ -287,8 +296,8 @@ final class CLIEnvironment: @unchecked Sendable {
         source.resume()
         signalSource = source
 
-        // SIGTERM = intentional stop from the GUI (stop/replace/rerun) or from a
-        // superseding run. Treated as a clean stop, not an interrupt/crash.
+        // SIGTERM = intentional stop from `orchard stop` or a superseding run.
+        // Treated as a clean stop, not an interrupt/crash.
         signal(SIGTERM, SIG_IGN)
         let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
         termSource.setEventHandler { [weak self] in
@@ -394,9 +403,8 @@ final class CLIEnvironment: @unchecked Sendable {
 
     func emitConsole(_ chunk: String) {
         if markLaunchedOnce() {
-            // Signal launch success to the skill on stderr, but keep the record
-            // in the steady "running" state (empty activity) so the GUI shows the
-            // pulsing dot instead of a perpetual spinner.
+            // Pollers of `orchard runs` treat `running` with an empty activity as
+            // "launched and attached", so clear it rather than writing "Launched".
             updateRecord(persistNow: true) { $0.activityText = "" }
             if json {
                 emitEvent(CLIEvent(type: "progress", stage: "Launched"))
@@ -453,12 +461,12 @@ final class CLIEnvironment: @unchecked Sendable {
         }
     }
 
-    // MARK: - Run record (GUI sync)
+    // MARK: - Run record
 
-    private func startRecord(worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
+    private func startRecord(id: String, worktree: WorktreeContext, scheme: String, destination: XcodeDestination) {
         let now = Date().timeIntervalSince1970
         let newRecord = RunRecord(
-            id: UUID().uuidString,
+            id: id,
             branchName: worktree.branchName,
             worktreeDisplayName: worktree.displayName,
             project: worktree.project,
@@ -514,6 +522,8 @@ final class CLIEnvironment: @unchecked Sendable {
     }
 
     func emitError(_ message: String) {
+        // A delegated run's stderr goes to /dev/null; the record is the only place the failure survives.
+        updateRecord(persistNow: true) { $0.log = Self.boundedAppend($0.log, message + "\n") }
         if json {
             emitEvent(CLIEvent(type: "error", text: message))
         } else {

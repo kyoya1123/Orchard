@@ -3,19 +3,10 @@ import Foundation
 public struct WorktreeContext: Equatable, Identifiable, Sendable {
     public let project: XcodeProject
     public let gitInfo: GitInfo?
-    public let terminalContexts: [TerminalContext]
-    public let sourceDescription: String
 
-    public init(
-        project: XcodeProject,
-        gitInfo: GitInfo?,
-        terminalContexts: [TerminalContext],
-        sourceDescription: String = "discovered"
-    ) {
+    public init(project: XcodeProject, gitInfo: GitInfo?) {
         self.project = project
         self.gitInfo = gitInfo
-        self.terminalContexts = terminalContexts
-        self.sourceDescription = sourceDescription
     }
 
     public var id: String {
@@ -30,33 +21,12 @@ public struct WorktreeContext: Equatable, Identifiable, Sendable {
         gitInfo?.branchName ?? "no branch"
     }
 
-    public var sessionCount: Int {
-        terminalContexts.count
-    }
-
-    public var isFocused: Bool {
-        terminalContexts.contains { $0.isFocused }
-    }
-
     public var lastModified: Date? {
         gitInfo?.lastModified
     }
 
     public var displayName: String {
-        let focusedPrefix = isFocused ? "Focused · " : ""
-        return "\(focusedPrefix)\(worktreeURL.lastPathComponent) · \(branchName)"
-    }
-
-    public var detail: String {
-        let sessionLabel = switch sessionCount {
-        case 0:
-            sourceDescription
-        case 1:
-            "1 session"
-        default:
-            "\(sessionCount) sessions"
-        }
-        return "\(project.displayName) · \(sessionLabel)"
+        "\(worktreeURL.lastPathComponent) · \(branchName)"
     }
 }
 
@@ -69,62 +39,9 @@ public struct WorktreeContextResolver: Sendable {
         self.gitService = gitService
     }
 
-    public func resolve(from terminalContexts: [TerminalContext]) async -> [WorktreeContext] {
-        var buckets: [String: (project: XcodeProject, gitInfo: GitInfo?, contexts: [TerminalContext], source: String)] = [:]
-        var discoveryRoots = Set<URL>()
-
-        for context in terminalContexts {
-            discoveryRoots.insert(context.workingDirectoryURL)
-            let contextGitInfo = await gitService.info(from: context.workingDirectoryURL)
-            if let rootURL = contextGitInfo?.rootURL {
-                discoveryRoots.insert(rootURL)
-            }
-
-            guard let project = try? projectDetector.detect(from: context.workingDirectoryURL) else {
-                continue
-            }
-
-            add(
-                project: project,
-                gitInfo: contextGitInfo,
-                context: context,
-                sourceDescription: "Ghostty",
-                to: &buckets
-            )
-        }
-
-        for root in discoveryRoots {
-            for candidateURL in worktreeCandidateURLs(near: root) {
-                guard let project = try? projectDetector.detect(from: candidateURL) else {
-                    continue
-                }
-
-                let gitInfo = await gitService.info(from: candidateURL)
-                add(
-                    project: project,
-                    gitInfo: gitInfo,
-                    context: nil,
-                    sourceDescription: "discovered",
-                    to: &buckets
-                )
-            }
-        }
-
-        return buckets.values
-            .map {
-                WorktreeContext(
-                    project: $0.project,
-                    gitInfo: $0.gitInfo,
-                    terminalContexts: $0.contexts,
-                    sourceDescription: $0.source
-                )
-            }
-            .sorted(by: sortWorktrees)
-    }
-
     public func resolve(fromConfiguredDirectoryURLs directoryURLs: [URL],
                         registeredRepositories: [RegisteredRepository] = []) async -> [WorktreeContext] {
-        var buckets: [String: (project: XcodeProject, gitInfo: GitInfo?, contexts: [TerminalContext], source: String)] = [:]
+        var buckets: [String: WorktreeContext] = [:]
         var repositoryRoots = Set<URL>()
         var nestedProjectDirectories: [URL: Set<String>] = [:]
 
@@ -135,8 +52,7 @@ public struct WorktreeContextResolver: Sendable {
             }
             // Preserve an explicit nested project (and non-Git projects).
             if let project = try? projectDetector.detect(from: directoryURL) {
-                add(project: project, gitInfo: await gitService.info(from: project.rootURL), context: nil,
-                    sourceDescription: "configured", to: &buckets)
+                add(project: project, gitInfo: await gitService.info(from: project.rootURL), to: &buckets)
                 if let root = gitInfo?.rootURL, project.rootURL.path.hasPrefix(root.path + "/") {
                     nestedProjectDirectories[root, default: []].insert(String(project.rootURL.path.dropFirst(root.path.count + 1)))
                 }
@@ -160,14 +76,7 @@ public struct WorktreeContextResolver: Sendable {
                     continue
                 }
 
-                let gitInfo = await gitService.info(from: candidateRoot)
-                add(
-                    project: project,
-                    gitInfo: gitInfo,
-                    context: nil,
-                    sourceDescription: "configured",
-                    to: &buckets
-                )
+                add(project: project, gitInfo: await gitService.info(from: candidateRoot), to: &buckets)
             }
         }
 
@@ -177,47 +86,17 @@ public struct WorktreeContextResolver: Sendable {
                 // unrelated project above this worktree.
                 guard let project = try? projectDetector.detect(from: directory),
                       project.rootURL.standardizedFileURL.path == directory.standardizedFileURL.path else { continue }
-                add(project: project, gitInfo: await gitService.info(from: directory), context: nil,
-                    sourceDescription: "CLI", to: &buckets)
+                add(project: project, gitInfo: await gitService.info(from: directory), to: &buckets)
             }
         }
 
-        return buckets.values
-            .map {
-                WorktreeContext(
-                    project: $0.project,
-                    gitInfo: $0.gitInfo,
-                    terminalContexts: $0.contexts,
-                    sourceDescription: $0.source
-                )
-            }
-            .sorted(by: sortWorktrees)
+        return buckets.values.sorted(by: sortWorktrees)
     }
 
-    private func add(
-        project: XcodeProject,
-        gitInfo: GitInfo?,
-        context: TerminalContext?,
-        sourceDescription: String,
-        to buckets: inout [String: (project: XcodeProject, gitInfo: GitInfo?, contexts: [TerminalContext], source: String)]
-    ) {
+    private func add(project: XcodeProject, gitInfo: GitInfo?, to buckets: inout [String: WorktreeContext]) {
         let key = "\(gitInfo?.rootURL.path ?? project.rootURL.path)|\(project.fileURL.path)"
-
-        if var bucket = buckets[key] {
-            if let context, !bucket.contexts.contains(context) {
-                bucket.contexts.append(context)
-            }
-            if bucket.source == "discovered" {
-                bucket.source = sourceDescription
-            }
-            buckets[key] = bucket
-        } else {
-            buckets[key] = (
-                project: project,
-                gitInfo: gitInfo,
-                contexts: context.map { [$0] } ?? [],
-                source: sourceDescription
-            )
+        if buckets[key] == nil {
+            buckets[key] = WorktreeContext(project: project, gitInfo: gitInfo)
         }
     }
 

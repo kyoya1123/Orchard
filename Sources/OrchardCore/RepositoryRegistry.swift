@@ -28,7 +28,7 @@ public struct RegisteredRepository: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-/// The GUI and all CLI processes share atomic, per-repository records. A
+/// All CLI processes share atomic, per-repository records. A
 /// process lock merges nested project locations without losing concurrent adds.
 public struct RepositoryRegistry: Sendable {
     public let root: URL

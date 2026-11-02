@@ -21,16 +21,12 @@ fi
 
 ORCHARD="$(command -v orchard || true)"
 if [ -z "$ORCHARD" ]; then
-  for cand in \
-    "$HOME/Projects/Orchard/Orchard.app/Contents/MacOS/orchard" \
-    "/Applications/Orchard.app/Contents/MacOS/orchard" \
-    "$HOME/Applications/Orchard.app/Contents/MacOS/orchard" \
-    "$HOME/Projects/Orchard/.build/release/orchard"; do
+  for cand in "$HOME/.local/bin/orchard" "$HOME/Projects/Orchard/.build/release/orchard"; do
     [ -x "$cand" ] && ORCHARD="$cand" && break
   done
 fi
 if [ -z "$ORCHARD" ]; then
-  echo 'orchard が見つかりません。Orchard.appの同梱CLIをPATHに通してください。' >&2
+  echo 'orchard が見つかりません。OrchardのScripts/install.shでインストールしてください。' >&2
   exit 6
 fi
 
