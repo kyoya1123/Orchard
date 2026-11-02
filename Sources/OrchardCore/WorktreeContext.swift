@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WorktreeContext: Equatable, Identifiable, Sendable {
+public struct WorktreeContext: Equatable, Sendable {
     public let project: XcodeProject
     public let gitInfo: GitInfo?
 
@@ -44,15 +44,23 @@ public struct WorktreeContextResolver: Sendable {
         var buckets: [String: WorktreeContext] = [:]
         var repositoryRoots = Set<URL>()
         var nestedProjectDirectories: [URL: Set<String>] = [:]
+        // The same worktree is typically reached from several of the passes below.
+        var gitInfoByPath: [String: GitInfo?] = [:]
+        func info(from url: URL) async -> GitInfo? {
+            if let cached = gitInfoByPath[url.path] { return cached }
+            let info = await gitService.info(from: url)
+            gitInfoByPath[url.path] = info
+            return info
+        }
 
         for directoryURL in directoryURLs.map({ $0.resolvingSymlinksInPath().standardizedFileURL }) {
-            let gitInfo = await gitService.info(from: directoryURL)
+            let gitInfo = await info(from: directoryURL)
             if let gitInfo {
                 repositoryRoots.insert(gitInfo.rootURL)
             }
             // Preserve an explicit nested project (and non-Git projects).
             if let project = try? projectDetector.detect(from: directoryURL) {
-                add(project: project, gitInfo: await gitService.info(from: project.rootURL), to: &buckets)
+                add(project: project, gitInfo: await info(from: project.rootURL), to: &buckets)
                 if let root = gitInfo?.rootURL, project.rootURL.path.hasPrefix(root.path + "/") {
                     nestedProjectDirectories[root, default: []].insert(String(project.rootURL.path.dropFirst(root.path.count + 1)))
                 }
@@ -76,7 +84,7 @@ public struct WorktreeContextResolver: Sendable {
                     continue
                 }
 
-                add(project: project, gitInfo: await gitService.info(from: candidateRoot), to: &buckets)
+                add(project: project, gitInfo: await info(from: candidateRoot), to: &buckets)
             }
         }
 
@@ -86,7 +94,7 @@ public struct WorktreeContextResolver: Sendable {
                 // unrelated project above this worktree.
                 guard let project = try? projectDetector.detect(from: directory),
                       project.rootURL.standardizedFileURL.path == directory.standardizedFileURL.path else { continue }
-                add(project: project, gitInfo: await gitService.info(from: directory), to: &buckets)
+                add(project: project, gitInfo: await info(from: directory), to: &buckets)
             }
         }
 
@@ -94,9 +102,9 @@ public struct WorktreeContextResolver: Sendable {
     }
 
     private func add(project: XcodeProject, gitInfo: GitInfo?, to buckets: inout [String: WorktreeContext]) {
-        let key = "\(gitInfo?.rootURL.path ?? project.rootURL.path)|\(project.fileURL.path)"
-        if buckets[key] == nil {
-            buckets[key] = WorktreeContext(project: project, gitInfo: gitInfo)
+        let context = WorktreeContext(project: project, gitInfo: gitInfo)
+        if buckets[context.id] == nil {
+            buckets[context.id] = context
         }
     }
 

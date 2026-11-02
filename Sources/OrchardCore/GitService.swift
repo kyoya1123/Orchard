@@ -38,6 +38,15 @@ public struct GitService: Sendable {
         )
     }
 
+    /// The `.git` directory shared by every worktree of the repository.
+    public func commonDirectory(from directoryURL: URL) async throws -> String {
+        try await ProcessRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/git"),
+            arguments: ["-C", directoryURL.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            currentDirectoryURL: nil
+        )
+    }
+
     private func lastCommitDate(at rootURL: URL) async -> Date? {
         guard let output = try? await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/git"),

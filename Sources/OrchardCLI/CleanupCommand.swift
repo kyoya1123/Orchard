@@ -15,7 +15,7 @@ struct CleanupCommand: AsyncParsableCommand {
     @OptionGroup var directories: DirectoryOptions
 
     mutating func run() async throws {
-        let paths = CLIEnvironment(extraDirectoryPaths: directories.dir, json: directories.json).directoryURLs
+        let paths = directories.directoryURLs
         guard let selectedScope = ArtifactCleanup.Scope(rawValue: scope) else {
             throw ValidationError("Unknown cleanup scope: \(scope)")
         }
@@ -39,7 +39,7 @@ struct CleanupWorker: AsyncParsableCommand {
         _ = setsid()
         _ = setpriority(PRIO_PROCESS, 0, 20)
         _ = setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_THROTTLE)
-        let paths = CLIEnvironment(extraDirectoryPaths: [], json: false).directoryURLs
+        let paths = DirectoryOptions.directoryURLs(explicit: [])
         _ = await Task.detached(priority: .background) {
             await ArtifactCleanup().run(apply: true, directories: paths)
         }.value

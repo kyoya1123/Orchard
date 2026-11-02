@@ -1,7 +1,10 @@
 import ArgumentParser
+import Foundation
 import OrchardCore
 
-@available(macOS 10.15, *)
+// Not a top-level `await OrchardCLI.main()` in main.swift: that resolves to the
+// synchronous ParsableCommand.main(), which runs no subcommand and only prints help.
+@main
 struct OrchardCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "orchard",
@@ -22,6 +25,19 @@ struct DirectoryOptions: ParsableArguments {
 
     @Flag(name: .long, help: "Emit machine-readable output (NDJSON for run, JSON array for list).")
     var json = false
+
+    var directoryURLs: [URL] { Self.directoryURLs(explicit: dir) }
+
+    /// Directory precedence: explicit `--dir` overrides everything, then the
+    /// `ORCHARD_DIRS` env var (colon-separated). With neither, discovery prefers
+    /// the current project, then shared manual/automatic registration.
+    static func directoryURLs(explicit paths: [String]) -> [URL] {
+        var paths = paths
+        if paths.isEmpty, let envValue = ProcessInfo.processInfo.environment["ORCHARD_DIRS"], !envValue.isEmpty {
+            paths = envValue.split(separator: ":").map(String.init)
+        }
+        return paths.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
+    }
 }
 
 /// Maps the mutually-exclusive `--device`/`--simulator` flags to a kind filter.
@@ -31,40 +47,14 @@ func destinationKindFilter(device: Bool, simulator: Bool) -> XcodeDestination.Ki
     return nil
 }
 
-/// Parses and runs the CLI. We dispatch `run()` on the *concrete* subcommand
-/// types: calling `run()` on an `any AsyncParsableCommand` existential outside
-/// ArgumentParser's own module resolves to the synchronous default (which just
-/// prints help), whereas the concrete types resolve to their async `run()`.
-/// Built-in commands (help/version) fall through to the synchronous default.
-func runOrchardCLI(_ arguments: [String]) async {
-    do {
-        let parsed = try OrchardCLI.parseAsRoot(arguments)
-        switch parsed {
-        case var command as RunCommand:
-            try await command.run()
-        case var command as ListBranches:
-            try await command.run()
-        case var command as ListSchemes:
-            try await command.run()
-        case var command as ListDestinations:
-            try await command.run()
-        case var command as RunsCommand:
-            try await command.run()
-        case var command as StopCommand:
-            try await command.run()
-        case var command as SimulatorEnsure:
-            try await command.run()
-        case var command as SimulatorBase:
-            try await command.run()
-        case var command as CleanupCommand:
-            try await command.run()
-        case var command as CleanupWorker:
-            try await command.run()
-        default:
-            var command = parsed
-            try command.run()
-        }
-    } catch {
-        OrchardCLI.exit(withError: error)
+private let prettyEncoder: JSONEncoder = {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes, .sortedKeys]
+    return encoder
+}()
+
+func printJSON<T: Encodable>(_ value: T) {
+    if let data = try? prettyEncoder.encode(value), let string = String(data: data, encoding: .utf8) {
+        print(string)
     }
 }

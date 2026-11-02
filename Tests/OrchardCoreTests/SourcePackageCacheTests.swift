@@ -259,19 +259,19 @@ final class SourcePackageCacheTests: XCTestCase, @unchecked Sendable {
     func testWaitingLeaseCanBeCancelledAndReacquired() async throws {
         let root = try temporaryDirectory()
         let path = root.appendingPathComponent("lock")
-        let first = try await CacheLease.acquire(path)
-        defer { first.unlock() }
-        let waiting = Task { try await CacheLease.acquire(path) }
+        let first = try await ArtifactLease.acquire(path, shared: false)
+        defer { first.close() }
+        let waiting = Task { try await ArtifactLease.acquire(path, shared: false) }
         try await Task.sleep(for: .milliseconds(200))
         waiting.cancel()
         do {
             let unexpected = try await waiting.value
-            unexpected.unlock()
+            unexpected.close()
             XCTFail("lock waiter ignored cancellation")
         } catch is CancellationError {} catch { XCTFail("unexpected \(error)") }
-        first.unlock()
-        let next = try await CacheLease.acquire(path)
-        next.unlock()
+        first.close()
+        let next = try await ArtifactLease.acquire(path, shared: false)
+        next.close()
     }
 
     func testDisabledOrMissingLockfileKeepsDefaultXcodeBehavior() async throws {

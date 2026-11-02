@@ -1,4 +1,3 @@
-import CryptoKit
 import Darwin
 import Foundation
 
@@ -56,8 +55,8 @@ public struct SourcePackageCache: Sendable {
         operation: @Sendable ([String]) async throws -> Value
     ) async throws -> Value {
         // Failure to lock must not fall through to an unprotected build.
-        let lease = try await CacheLease.acquire(context.projectLock, checkCancellation: checkCancellation)
-        defer { lease.unlock() }
+        let lease = try await ArtifactLease.acquire(context.projectLock, shared: false, checkCancellation: checkCancellation)
+        defer { lease.close() }
         try Task.checkCancellation()
         try checkCancellation()
         if let owner {
@@ -110,11 +109,7 @@ public struct SourcePackageCache: Sendable {
         )
         guard let resolved = try? Data(contentsOf: lockfile),
               !((try? Self.pins(in: resolved)) ?? [:]).isEmpty else { return nil }
-        let commonDirectory = try await ProcessRunner.run(
-            executableURL: URL(fileURLWithPath: "/usr/bin/git"),
-            arguments: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            currentDirectoryURL: project.rootURL
-        )
+        let commonDirectory = try await GitService().commonDirectory(from: project.rootURL)
         let version = try await ProcessRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             arguments: ["-version"], currentDirectoryURL: project.rootURL
@@ -128,8 +123,8 @@ public struct SourcePackageCache: Sendable {
                 arguments: ["-p"], currentDirectoryURL: nil
             )
         }
-        let repositoryCache = root.appendingPathComponent(Self.digest(Data(commonDirectory.utf8)))
-        let projectID = Self.digest(Data(project.fileURL.resolvingSymlinksInPath().path.utf8))
+        let repositoryCache = root.appendingPathComponent(ArtifactStore.key(commonDirectory))
+        let projectID = ArtifactStore.key(project.fileURL.resolvingSymlinksInPath().path)
         let managed = repositoryCache.appendingPathComponent("worktrees/\(projectID)/SourcePackages")
         // Reuse the project's existing standard Xcode checkout on first use;
         // do not replace, migrate, delete, or deduplicate someone else's files.
@@ -162,11 +157,7 @@ public struct SourcePackageCache: Sendable {
     }
 
     static func cacheKey(resolved: Data, toolchain: String) -> String {
-        digest(resolved + Data([0]) + Data(toolchain.utf8))
-    }
-
-    private static func digest(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        ArtifactStore.key(resolved + Data([0]) + Data(toolchain.utf8))
     }
 
     private func prepare(
@@ -174,8 +165,8 @@ public struct SourcePackageCache: Sendable {
         log: @Sendable (String) -> Void
     ) async throws {
         guard !FileManager.default.fileExists(atPath: context.packages.path) else { return }
-        let lease = try await CacheLease.acquire(context.templateLock, checkCancellation: checkCancellation)
-        defer { lease.unlock() }
+        let lease = try await ArtifactLease.acquire(context.templateLock, shared: false, checkCancellation: checkCancellation)
+        defer { lease.close() }
         let source = context.template.appendingPathComponent("SourcePackages")
         guard FileManager.default.fileExists(atPath: source.path) else { return }
         log("SPM: cloning cached packages for this worktree.\n")
@@ -190,8 +181,8 @@ public struct SourcePackageCache: Sendable {
         guard (try? Data(contentsOf: context.lockfile)) == context.resolved,
               FileManager.default.fileExists(atPath: context.packages.appendingPathComponent("workspace-state.json").path)
         else { return }
-        let lease = try await CacheLease.acquire(context.templateLock, checkCancellation: checkCancellation)
-        defer { lease.unlock() }
+        let lease = try await ArtifactLease.acquire(context.templateLock, shared: false, checkCancellation: checkCancellation)
+        defer { lease.close() }
         guard !FileManager.default.fileExists(atPath: context.template.path) else { return }
         log("SPM: saving an APFS template for other worktrees.\n")
         let parent = context.template.deletingLastPathComponent()
@@ -448,36 +439,4 @@ public struct SourcePackageCache: Sendable {
             guard head == pin.revision, status.isEmpty else { throw OrchardError.message("SPM checkout is modified: \(identity)") }
         }
     }
-}
-
-/// flock is process-wide coordination (an actor alone would not cover CLI).
-/// Nonblocking attempts keep the executor responsive and the wait cancellable.
-final class CacheLease: @unchecked Sendable {
-    private var descriptor: Int32
-    private init(_ descriptor: Int32) { self.descriptor = descriptor }
-
-    static func acquire(_ path: URL, checkCancellation: @Sendable () throws -> Void = {}) async throws -> CacheLease {
-        try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let descriptor = open(path.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        let lease = CacheLease(descriptor)
-        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
-            guard errno == EWOULDBLOCK || errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            try Task.checkCancellation()
-            try checkCancellation()
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        try Task.checkCancellation()
-        try checkCancellation()
-        return lease
-    }
-
-    func unlock() {
-        if descriptor >= 0 {
-            flock(descriptor, LOCK_UN)
-            close(descriptor)
-            descriptor = -1
-        }
-    }
-    deinit { unlock() }
 }

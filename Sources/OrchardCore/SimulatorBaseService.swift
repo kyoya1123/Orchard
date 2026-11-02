@@ -33,6 +33,11 @@ public struct SimulatorBaseService: Sendable {
         self.command = command
     }
 
+    /// Cleanup recognizes a merged branch's Simulator by this same name.
+    public static func simulatorName(forBranch branch: String) -> String {
+        branch.replacingOccurrences(of: "/", with: "-")
+    }
+
     public func prepare(name: String? = nil, selection: SimulatorSelection = .init(),
                         project: XcodeProject? = nil,
                         progress: @Sendable (String) -> Void = { _ in }) async throws -> PreparedSimulator {
@@ -42,8 +47,8 @@ public struct SimulatorBaseService: Sendable {
         let activity: ArtifactActivity?
         if let project { activity = try await ArtifactActivity.begin(project: project) } else { activity = nil }
         defer { activity?.finish() }
-        let lease = try await CacheLease.acquire(root.appendingPathComponent("lock"))
-        defer { lease.unlock() }
+        let lease = try await ArtifactLease.acquire(root.appendingPathComponent("lock"), shared: false)
+        defer { lease.close() }
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: root.appendingPathComponent("devices"), withIntermediateDirectories: true)
         let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(try await simctl(["list", "-j"]).utf8))

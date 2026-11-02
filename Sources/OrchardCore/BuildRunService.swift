@@ -1,15 +1,12 @@
 import Foundation
 
 public final class BuildRunService: @unchecked Sendable {
-    private let processRunner: ProcessRunner
     private var runningProcess: Process?
     private var launchedApp: RunnableApp?
     private var isStopping = false
     private var shouldStop = false
 
-    public init(processRunner: ProcessRunner = ProcessRunner()) {
-        self.processRunner = processRunner
-    }
+    public init() {}
 
     public func stop() {
         isStopping = true
@@ -32,25 +29,21 @@ public final class BuildRunService: @unchecked Sendable {
         do {
             switch destination.kind {
             case .device:
-                try await terminateOnDevice(app: launchedApp, destination: destination, log: log)
+                try await terminateOnDevice(app: launchedApp, destination: destination)
             case .simulator:
-                try await terminateOnSimulator(app: launchedApp, destination: destination, log: log)
+                try await terminateOnSimulator(app: launchedApp, destination: destination)
             }
         } catch {
             log("\nStop app failed: \(error.localizedDescription)\n")
         }
     }
 
-    /// - Parameter attachConsole: when `true` (default) the launch attaches to
-    ///   the app's console and blocks until the app exits — the app's lifetime
-    ///   is tied to this process. When `false`, the app is launched detached:
-    ///   it keeps running independently and this method returns right after a
-    ///   successful launch (no console output is captured).
+    /// The launch attaches to the app's console and blocks until the app exits,
+    /// so the app's lifetime is tied to this process.
     public func buildAndRun(
         project: XcodeProject,
         scheme: String,
         destination: XcodeDestination,
-        attachConsole: Bool = true,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void = { _ in }
@@ -103,7 +96,6 @@ public final class BuildRunService: @unchecked Sendable {
             try await installAndLaunchOnDevice(
                 app: app,
                 destination: destination,
-                attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog,
@@ -113,7 +105,6 @@ public final class BuildRunService: @unchecked Sendable {
             try await installAndLaunchOnSimulator(
                 app: app,
                 destination: destination,
-                attachConsole: attachConsole,
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog,
@@ -163,7 +154,6 @@ public final class BuildRunService: @unchecked Sendable {
     private func installAndLaunchOnSimulator(
         app: RunnableApp,
         destination: XcodeDestination,
-        attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void,
@@ -199,19 +189,14 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         activity?.finish()
-        progress(attachConsole ? "" : "Launching")
-        var launchArguments = ["simctl", "launch", "--terminate-running-process"]
-        if attachConsole {
-            // Streams the app's console and blocks until it exits.
-            // Uses a PTY (line-buffered) instead of a plain pipe so the app's
-            // stdout/print() output is captured; a plain --console pipe is
-            // block-buffered and drops print output.
-            launchArguments.append("--console-pty")
-        }
-        launchArguments += [destination.id, app.bundleIdentifier]
+        progress("")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: launchArguments,
+            // A PTY (line-buffered) instead of a plain pipe captures the app's
+            // stdout/print() output; a plain --console pipe is block-buffered
+            // and drops print output.
+            arguments: ["simctl", "launch", "--terminate-running-process", "--console-pty",
+                        destination.id, app.bundleIdentifier],
             currentDirectoryURL: nil,
             log: consoleLog
         )
@@ -221,7 +206,6 @@ public final class BuildRunService: @unchecked Sendable {
     private func installAndLaunchOnDevice(
         app: RunnableApp,
         destination: XcodeDestination,
-        attachConsole: Bool,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void,
@@ -247,17 +231,12 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         activity?.finish()
-        var launchArguments = [
-            "devicectl", "device", "--quiet", "process", "launch",
-            "--device", destination.id, "--terminate-existing"
-        ]
-        if attachConsole {
-            launchArguments.append("--console")
-        }
-        launchArguments.append(app.bundleIdentifier)
         try await runStreamingWaitingForDeviceUnlock(
-            arguments: launchArguments,
-            phase: attachConsole ? "" : "Launching",
+            arguments: [
+                "devicectl", "device", "--quiet", "process", "launch",
+                "--device", destination.id, "--terminate-existing", "--console", app.bundleIdentifier
+            ],
+            phase: "",
             log: consoleLog,
             progress: progress,
             commandLog: commandLog
@@ -305,11 +284,7 @@ public final class BuildRunService: @unchecked Sendable {
         }
     }
 
-    private func terminateOnSimulator(
-        app: RunnableApp,
-        destination: XcodeDestination,
-        log: @Sendable @escaping (String) -> Void
-    ) async throws {
+    private func terminateOnSimulator(app: RunnableApp, destination: XcodeDestination) async throws {
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "terminate", destination.id, app.bundleIdentifier],
@@ -318,11 +293,7 @@ public final class BuildRunService: @unchecked Sendable {
         )
     }
 
-    private func terminateOnDevice(
-        app: RunnableApp,
-        destination: XcodeDestination,
-        log: @Sendable @escaping (String) -> Void
-    ) async throws {
+    private func terminateOnDevice(app: RunnableApp, destination: XcodeDestination) async throws {
         let appURL = try await installedDeviceAppURL(
             bundleIdentifier: app.bundleIdentifier,
             destination: destination

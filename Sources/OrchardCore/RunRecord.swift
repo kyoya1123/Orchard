@@ -35,17 +35,6 @@ public struct RunRecord: Codable, Identifiable, Sendable {
                 modelCode: destination.modelCode
             )
         }
-
-        public func toXcodeDestination() -> XcodeDestination {
-            XcodeDestination(
-                id: id,
-                name: name,
-                runtime: runtime,
-                isAvailable: true,
-                kind: kind == "device" ? .device : .simulator,
-                modelCode: modelCode
-            )
-        }
     }
 
     public let id: String          // UUID string
@@ -96,14 +85,6 @@ public struct RunRecord: Codable, Identifiable, Sendable {
         self.activityText = activityText
         self.log = log
         self.pid = pid
-    }
-
-    public func toXcodeProject() -> XcodeProject {
-        XcodeProject(
-            rootURL: URL(fileURLWithPath: projectRootPath, isDirectory: true),
-            fileURL: URL(fileURLWithPath: projectFilePath),
-            kind: projectKind == "workspace" ? .workspace : .project
-        )
     }
 
     public var isFinished: Bool {

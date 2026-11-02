@@ -11,7 +11,7 @@ final class SelectionResolverTests: XCTestCase {
         runtime: String = "17.0",
         id: String = UUID().uuidString
     ) -> XcodeDestination {
-        XcodeDestination(id: id, name: name, runtime: runtime, isAvailable: true, kind: kind)
+        XcodeDestination(id: id, name: name, runtime: runtime, kind: kind)
     }
 
     private func worktree(branch: String, path: String) -> WorktreeContext {

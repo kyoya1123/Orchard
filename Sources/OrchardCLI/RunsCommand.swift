@@ -91,12 +91,4 @@ struct RunsCommand: AsyncParsableCommand {
             updatedAt = record.updatedAt
         }
     }
-
-    private func printJSON<T: Encodable>(_ value: T) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes, .sortedKeys]
-        if let data = try? encoder.encode(value), let string = String(data: data, encoding: .utf8) {
-            print(string)
-        }
-    }
 }
