@@ -13,7 +13,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let commands: CleanupCommands
     }
 
-    func fixture(existing: Bool = true) throws -> Fixture {
+    func fixture(existing: Bool = true, realGit: Bool = false) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("Orchard Cleanup Tests-\(UUID().uuidString)").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -30,12 +30,16 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let date = clock
         let worker = ArtifactCleanup(store: store, derivedData: root.appendingPathComponent("DerivedData"),
             devices: root.appendingPathComponent("Devices"), now: { date }, command: { tool, args in
-                try await commands.run(tool, args)
+                if realGit && tool == "/usr/bin/git" {
+                    return try await ProcessRunner.run(executableURL: URL(fileURLWithPath: tool),
+                        arguments: args, currentDirectoryURL: nil)
+                }
+                return try await commands.run(tool, args)
             })
         return Fixture(root: root, store: store, owner: owner, worker: worker, commands: commands)
     }
 
-    func simulator(_ f: Fixture, name: String = "feature-example", state: String = "Booted",
+    func simulator(_ f: Fixture, name: String = "feature-example", state: String = "Shutdown",
                    age: TimeInterval = 0, owners: Set<ArtifactOwner>? = nil) async throws -> String {
         let id = UUID().uuidString
         let record = ArtifactSimulator(udid: id, name: name, owners: owners ?? [f.owner],
@@ -56,16 +60,16 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         return path
     }
 
-    func testBootedOrphanIsStoppedAndRemovedEvenWhenRecentlyUsed() async throws {
+    func testBootedOrphanIsPreservedEvenWhenWorktreeIsMissing() async throws {
         let f = try fixture(existing: false)
-        let id = try await simulator(f)
+        let id = try await simulator(f, state: "Booted")
         let dd = try cache(f)
         let report = await f.worker.run(apply: true, discover: false)
         XCTAssertNil(report.error)
         let calls = await f.commands.verbs
-        XCTAssertEqual(calls.filter { ["shutdown", "delete"].contains($0) }, ["shutdown", "delete"])
+        XCTAssertTrue(calls.filter { ["shutdown", "delete"].contains($0) }.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dd.path))
-        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "missing-worktree" && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "booted-or-transitioning" && $0.outcome == "preserved" })
     }
 
     func testExistingWorktreeSevenDayBoundaryAndSourceArePreserved() async throws {
@@ -91,7 +95,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.setAttributes([.modificationDate: clock], ofItemAtPath: logs.path)
         try FileManager.default.setAttributes([.modificationDate: clock.addingTimeInterval(-8 * 86400)], ofItemAtPath: dd.path)
         let report = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(report.actions.isEmpty)
+        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
     }
 
@@ -104,7 +108,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         await f.commands.add(renamed, name: "my custom device", state: "Booted", date: clock)
         await f.commands.add(UUID().uuidString, name: "unknown-branch", state: "Booted", date: clock)
         let report = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(report.actions.isEmpty)
+        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
         let calls = await f.commands.verbs
         XCTAssertFalse(calls.contains("shutdown"))
         XCTAssertFalse(calls.contains("delete"))
@@ -124,17 +128,18 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(calls.contains("shutdown"))
     }
 
-    func testSimulatorLeaseProtectsPreparationAndShutdownFailurePreventsDeletion() async throws {
+    func testSimulatorLeaseProtectsPreparationAndBootRacePreventsDeletion() async throws {
         let f = try fixture(existing: false)
         let id = try await simulator(f)
         let lease = try XCTUnwrap(ArtifactLease.tryAcquire(f.store.simulatorLock(id), shared: true))
         let locked = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(locked.actions.contains { $0.outcome == "preserved" })
+        XCTAssertTrue(locked.actions.contains { $0.reason == "active-build-or-install" })
         lease.close()
-        await f.commands.failShutdown()
-        let failed = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(failed.actions.contains { $0.outcome == "preserved" })
+        await f.commands.bootDuringInspection(id)
+        let raced = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(raced.actions.contains { $0.outcome == "preserved" })
         let calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains("shutdown"))
         XCTAssertFalse(calls.contains("delete"))
     }
 
@@ -146,7 +151,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
                                   worktreePath: path.path, repositoryPath: f.owner.repositoryPath)
         _ = try await simulator(f, owners: [f.owner, alive])
         let report = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(report.actions.isEmpty)
+        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
     }
 
     func testUnknownExternalDataSymlinksAndExcludedProjectRemain() async throws {
@@ -158,7 +163,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: dd)
         _ = try await simulator(f)
         let report = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(report.actions.isEmpty)
+        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
         XCTAssertTrue(FileManager.default.fileExists(atPath: unknown.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
     }
@@ -172,6 +177,65 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
             let report = await f.worker.run(apply: true, discover: false)
             XCTAssertTrue(report.actions.contains { $0.reason == (external ? "external-build" : "modified-packages") })
             XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
+        }
+    }
+
+    private func packageCheckout(in cache: URL) async throws -> URL {
+        let checkout = cache.appendingPathComponent("SourcePackages/checkouts/package")
+        try FileManager.default.createDirectory(at: checkout.appendingPathComponent(".swiftpm/xcode"),
+                                                withIntermediateDirectories: true)
+        try Data(".swiftpm/\n".utf8).write(to: checkout.appendingPathComponent(".gitignore"))
+        try Data("original source".utf8).write(to: checkout.appendingPathComponent("Source.swift"))
+        for arguments in [["init", "-q"], ["add", "."],
+                          ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                           "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "initial"]] {
+            _ = try await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/git"),
+                arguments: arguments, currentDirectoryURL: checkout)
+        }
+        return checkout
+    }
+
+    func testEmptyIgnoredPackageDirectoriesDoNotPreventCleanup() async throws {
+        let f = try fixture(existing: false, realGit: true)
+        let dd = try cache(f)
+        _ = try await packageCheckout(in: dd)
+
+        let preview = await f.worker.run(apply: false, discover: false)
+        XCTAssertNil(preview.error)
+        XCTAssertEqual(preview.actions.count, 1)
+        XCTAssertEqual(preview.actions.first?.outcome, "would-remove")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
+
+        let applied = await f.worker.run(apply: true, discover: false)
+        XCTAssertNil(applied.error)
+        XCTAssertEqual(applied.actions.count, 1)
+        XCTAssertEqual(applied.actions.first?.outcome, "removed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dd.path))
+    }
+
+    func testPackageFilesAndIgnoredSymlinksRemainProtected() async throws {
+        for path in ["Source.swift", "untracked file.txt", ".swiftpm/xcode/notes.txt", ".swiftpm/xcode/link"] {
+            let f = try fixture(existing: false, realGit: true)
+            let dd = try cache(f)
+            let checkout = try await packageCheckout(in: dd)
+            let modified = checkout.appendingPathComponent(path)
+            if path.hasSuffix("/link") {
+                try FileManager.default.createSymbolicLink(atPath: modified.path, withDestinationPath: "missing-target")
+            } else {
+                try Data("local change".utf8).write(to: modified)
+            }
+
+            let report = await f.worker.run(apply: true, discover: false)
+            XCTAssertNil(report.error, path)
+            XCTAssertEqual(report.actions.count, 1, path)
+            XCTAssertEqual(report.actions.first?.reason, "modified-packages", path)
+            XCTAssertEqual(report.actions.first?.outcome, "preserved", path)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path), path)
+            if path.hasSuffix("/link") {
+                XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: modified.path), "missing-target")
+            } else {
+                XCTAssertEqual(try String(contentsOf: modified, encoding: .utf8), "local change", path)
+            }
         }
     }
 
@@ -201,6 +265,78 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
     }
 
+    func testSimulatorOneDayBoundaryUsesMetadataAndDoesNotTouchDerivedData() async throws {
+        let f = try fixture()
+        let old = try await simulator(f, age: ArtifactCleanup.simulatorRetention + 1)
+        let boundary = try await simulator(f, age: ArtifactCleanup.simulatorRetention)
+        let recent = try await simulator(f, age: ArtifactCleanup.simulatorRetention - 1)
+        let dd = try cache(f, age: 9 * 86400)
+        let preview = await f.worker.run(apply: false, discover: false, scope: .simulators)
+        XCTAssertEqual(preview.actions.filter { $0.outcome == "would-remove" }.map(\.target), [old])
+        let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+        XCTAssertTrue(report.actions.contains { $0.target == old && $0.reason == "unused-over-1-day" && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == boundary && $0.outcome == "preserved" })
+        XCTAssertTrue(report.actions.contains { $0.target == recent && $0.outcome == "preserved" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dd.path))
+    }
+
+    func testUnknownUsageAndRecentCoreSimulatorBootArePreserved() async throws {
+        let f = try fixture()
+        let unknown = try await simulator(f)
+        try f.store.write(ArtifactSimulator(udid: unknown, name: "feature-example", owners: [f.owner], lastUsedAt: 0),
+                          to: f.store.simulatorURL(unknown))
+        await f.commands.setDates(unknown, used: "invalid", booted: nil)
+        let recent = try await simulator(f, age: 9 * 86400)
+        await f.commands.setDates(recent, used: nil, booted: ISO8601DateFormatter().string(from: clock))
+        let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+        XCTAssertTrue(report.actions.contains { $0.target == unknown && $0.reason == "unknown-last-use" })
+        XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
+    }
+
+    func testExternalWorktreeProcessAndExternalBuildProtectOldSimulator() async throws {
+        for externalBuild in [true, false] {
+            let f = try fixture()
+            _ = try await simulator(f, age: 3 * 86400)
+            if externalBuild { await f.commands.setBusy(external: true) }
+            else { await f.commands.setOpenPath(f.owner.worktreePath) }
+            let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+            XCTAssertTrue(report.actions.contains { $0.reason == "external-use" && $0.outcome == "preserved" })
+            let calls = await f.commands.verbs
+            XCTAssertFalse(calls.contains("delete"))
+        }
+    }
+
+    func testMergedOwnerRequiresCleanNonDefaultBranchAndCachedAncestry() async throws {
+        for mode in ["merged", "dirty", "unmerged", "default", "detached", "missing-remote", "renamed-branch"] {
+            let f = try fixture()
+            let id = try await simulator(f)
+            await f.commands.setMerge(mode, worktree: f.owner.worktreePath)
+            let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+            if mode == "merged" {
+                XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "merged-into-cached-origin-default" && $0.outcome == "removed" })
+            } else {
+                XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" }, mode)
+            }
+        }
+    }
+
+    func testLegacyPackageCacheAndLiveOwnerAreNotDeleted() async throws {
+        let f = try fixture()
+        let packages = f.root.appendingPathComponent("packages")
+        let repository = packages.appendingPathComponent("repo-cache")
+        let directory = repository.appendingPathComponent("worktrees/\(ArtifactStore.key(f.owner.projectPath))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let worker = ArtifactCleanup(store: f.store, derivedData: f.worker.derivedData, devices: f.worker.devices,
+                                     sourcePackages: packages, command: { try await f.commands.run($0, $1) })
+        let legacy = await worker.run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(legacy.actions.first?.reason, "package-ownership-unverified")
+        try f.store.write(SourcePackageOwnership(owner: f.owner, repositoryCacheID: "repo-cache", resolved: Data()),
+                          to: directory.appendingPathComponent("owner.json"))
+        let live = await worker.run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(live.actions.first?.reason, "live-or-excluded-worktree")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+    }
+
     func testOrphanOwnershipUsesPathBoundariesAndRecordedCodexAssociation() throws {
         let f = try fixture()
         let main = ArtifactOwner(projectPath: f.owner.repositoryPath + "/App.xcodeproj",
@@ -222,6 +358,17 @@ actor CleanupCommands {
     var externalBuild = false
     var dirtyPackages = false
     var buildDuringPackageCheck = false
+    var openPath = ""
+    var bootOnInspection: String?
+    var mergeMode = ""
+    var mergeWorktree = ""
+    func setOpenPath(_ path: String) { openPath = path }
+    func bootDuringInspection(_ id: String) { bootOnInspection = id }
+    func setDates(_ id: String, used: String?, booted: String?) {
+        devices[id]?["lastUsedAt"] = used
+        devices[id]?["lastBootedAt"] = booted
+    }
+    func setMerge(_ mode: String, worktree: String) { mergeMode = mode; mergeWorktree = worktree }
 
     func add(_ id: String, name: String, state: String, date: Date) {
         devices[id] = ["udid": id, "name": name, "state": state,
@@ -233,7 +380,21 @@ actor CleanupCommands {
 
     func run(_ tool: String, _ args: [String]) throws -> String {
         if tool == "/bin/ps" { return externalBuild ? "123 /usr/bin/xcodebuild\n" : "" }
+        if tool == "/usr/sbin/lsof" {
+            if let id = bootOnInspection { devices[id]?["state"] = "Booted"; bootOnInspection = nil }
+            return openPath.isEmpty ? "" : "n" + openPath + "\n"
+        }
         if tool == "/usr/bin/git" {
+            if !mergeMode.isEmpty {
+                if args.contains("--show-toplevel") { return mergeWorktree }
+                if args.contains("symbolic-ref") {
+                    if args.contains("refs/remotes/origin/HEAD") { return mergeMode == "missing-remote" ? "" : "refs/remotes/origin/main" }
+                    return mergeMode == "detached" ? "" : (mergeMode == "default" ? "refs/heads/main" : (mergeMode == "renamed-branch" ? "refs/heads/other" : "refs/heads/feature/example"))
+                }
+                if args.contains("rev-parse") { return "abc" }
+                if args.contains("merge-base") { return mergeMode == "unmerged" ? "def" : "abc" }
+                if args.contains("status") { return mergeMode == "dirty" ? " M Source.swift" : "" }
+            }
             if buildDuringPackageCheck { externalBuild = true }
             return dirtyPackages ? " M Source.swift\n" : ""
         }
