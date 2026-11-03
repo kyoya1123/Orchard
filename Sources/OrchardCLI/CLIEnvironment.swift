@@ -118,7 +118,8 @@ final class CLIEnvironment: @unchecked Sendable {
             in: destinationList
         ).get()
 
-        return (worktree, resolvedScheme, resolvedDestination)
+        let current = try await SimulatorBaseService().prepareManagedDestination(resolvedDestination, project: worktree.project)
+        return (worktree, resolvedScheme, current)
     }
 
     /// Resolves here first so selection errors and Simulator preparation are

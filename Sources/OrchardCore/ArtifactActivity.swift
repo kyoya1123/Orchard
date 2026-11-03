@@ -92,12 +92,16 @@ final class ArtifactLease: @unchecked Sendable {
     }
 
     /// Polls nonblocking attempts so the executor stays responsive and the wait cancellable.
-    static func acquire(_ path: URL, shared: Bool = true,
+    static func acquire(_ path: URL, shared: Bool = true, timeout: Duration? = nil,
                         checkCancellation: () throws -> Void = {}) async throws -> ArtifactLease {
+        let deadline = timeout.map { ContinuousClock.now.advanced(by: $0) }
         while true {
             try Task.checkCancellation()
             try checkCancellation()
             if let lease = try tryAcquire(path, shared: shared) { return lease }
+            if let deadline, ContinuousClock.now >= deadline {
+                throw OrchardError.message("Timed out waiting for artifact lock: \(path.lastPathComponent)")
+            }
             try await Task.sleep(for: .milliseconds(50))
         }
     }
@@ -118,6 +122,7 @@ public final class ArtifactActivity: @unchecked Sendable {
     let owner: ArtifactOwner
     private let store: ArtifactStore
     private var leases: [ArtifactLease]
+    private var deviceActivities: [DeviceActivity] = []
 
     private init(owner: ArtifactOwner, store: ArtifactStore, lease: ArtifactLease) {
         self.owner = owner
@@ -143,7 +148,8 @@ public final class ArtifactActivity: @unchecked Sendable {
 
     public func useSimulator(udid: String, name: String) async throws {
         guard UUID(uuidString: udid) != nil, !ArtifactStore.isStandardSimulator(name) else { return }
-        leases.append(try await ArtifactLease.acquire(store.simulatorLock(udid)))
+        let lease = try await ArtifactLease.acquire(store.simulatorLock(udid))
+        deviceActivities.append(try DeviceActivity(store: store, device: udid, lease: lease))
         let update = try await ArtifactLease.acquire(store.root.appendingPathComponent("registry.lock"), shared: false)
         defer { update.close() }
         var record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(udid))
@@ -160,6 +166,8 @@ public final class ArtifactActivity: @unchecked Sendable {
         guard !leases.isEmpty else { return }
         try? store.write(ArtifactProject(owner: owner, lastUsedAt: Date().timeIntervalSince1970),
                          to: store.projectURL(owner.projectPath))
+        for activity in deviceActivities { activity.finish(scheduleCleanup: false) }
+        deviceActivities.removeAll()
         for lease in leases { lease.close() }
         leases.removeAll()
         BackgroundCleanup.schedule()
@@ -172,14 +180,26 @@ public enum BackgroundCleanup {
         Task.detached(priority: .background) { await launch() }
     }
 
+    /// Every command invocation checks devices whose owners disappeared. It
+    /// uses recorded ownership only, so it never rescans repositories.
+    public static func request() async {
+        guard (try? await CleanupInvocation().enqueue()) != nil else { return }
+        await launch(arguments: ["cleanup-worker", "--devices-only"])
+    }
+
     public static func launch() async {
+        await launch(arguments: ["cleanup-worker"])
+    }
+
+    private static func launch(arguments: [String]) async {
+        guard ProcessInfo.processInfo.environment["ORCHARD_DISABLE_BACKGROUND_CLEANUP"] != "1" else { return }
         guard let executable = Bundle.main.executableURL, executable.lastPathComponent == "orchard" else { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
         DispatchQueue.global(qos: .background).async {
             defer { continuation.resume() }
             let process = Process()
             process.executableURL = executable
-            process.arguments = ["cleanup-worker"]
+            process.arguments = arguments
             process.qualityOfService = .background
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice

@@ -10,8 +10,27 @@ struct OrchardCLI: AsyncParsableCommand {
         commandName: "orchard",
         abstract: "Build and run iOS apps from a worktree/scheme/destination.",
         subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self, StopCommand.self, SimulatorCommand.self,
-                      CleanupCommand.self, CleanupWorker.self]
+                      DeviceUseCommand.self, CleanupCommand.self, CleanupWorker.self]
     )
+
+    static func main() async {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        // Help, cleanup preview and the worker itself never schedule an apply pass.
+        if ["run", "list", "runs", "simulator"].contains(arguments.first ?? ""),
+           !arguments.contains("--help"), !arguments.contains("-h") {
+            await BackgroundCleanup.request()
+        }
+        do {
+            var command = try parseAsRoot(arguments)
+            if var asyncCommand = command as? AsyncParsableCommand {
+                try await asyncCommand.run()
+            } else {
+                try command.run()
+            }
+        } catch {
+            exit(withError: error)
+        }
+    }
 }
 
 /// Options shared by subcommands that discover worktrees.

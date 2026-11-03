@@ -28,7 +28,11 @@ This reduces growth from new worktrees; it does not shrink existing Build produc
 
 A base is created, booted through `simctl bootstatus`, checked for system apps only, then shut down. Orchard installs no app and applies no app settings to it. Bases are stored in a separate CoreSimulator device set under `~/Library/Application Support/Orchard/SimulatorBases-v1/devices`, so they do not appear among normal run destinations. The registry includes the device type, runtime build, Xcode build/tool path and initialization revision. Matching bases are reused; changes prepare a new base on demand, not a new base for every build.
 
-After preparation (and cloning, when requested) succeeds, obsolete registered bases are deleted only if still shut down, unmodified in identity, and free of user-installed apps. Busy/modified bases are preserved with a diagnostic and retried later. Failed initialization/cloning retains the previous base. Branch Simulators, their app data, and unmanaged devices—including a legacy device named `base`—are never deleted by this feature. Cross-process locking prevents duplicate initialization. APFS sharing reduces growth of new Simulators; it does not compact existing ones or prevent new logs/app data from accumulating.
+Bases coexist per device type and runtime. After preparation (and cloning, when requested) succeeds, only obsolete registered bases of the same device type and runtime are deleted, and only if unmodified in identity and free of user-installed apps; a booted obsolete base is shut down first. Busy/modified bases are preserved with a diagnostic and retried later. Failed initialization/cloning retains the previous base. Unmanaged devices—including a legacy device named `base`—are never deleted by this feature. Cross-process locking prevents duplicate initialization. APFS sharing reduces growth of new Simulators; it does not compact existing ones or prevent new logs/app data from accumulating.
+
+Branch Simulators cloned by Orchard survive Xcode or simctl updates. Only a changed build of the same runtime replaces one: a shut-down clone is deleted and cloned again under the same name, while a booted clone keeps being used and is replaced by the next preparation after it stops. Selecting another device type or runtime never deletes other Simulators. A managed Simulator passed as `--destination` is resolved through the same path, so a run never launches a replaced clone's stale UDID.
+
+With `--runtime` omitted, Orchard picks the newest installed iOS runtime that supports the requested device type. simctl's per-runtime supported-device list wins over the device's min/max runtime range. Unsupported combinations fail before anything is created or deleted, listing the compatible installed runtimes.
 
 ```bash
 # Prepare/refresh only the base; no app build or installation
@@ -49,18 +53,34 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 
 ## Background artifact cleanup
 
-Orchard checks for unused artifacts when preparing a branch Simulator and around package/build operations. Collection runs in a separate background process with low CPU and disk I/O priority, and a process lock coalesces overlapping requests.
+Orchard checks for unused artifacts when preparing a branch Simulator and around package/build operations. In addition, every `run`, `list`, `runs` and `simulator` invocation checks devices (Simulators and marked AVDs) using existing ownership records only. Collection runs in a separate background process with low CPU priority; only its `simctl`, `adb` and `avdmanager` clients run at utility QoS so their IPC cannot stall. Overlapping requests are coalesced, and a request arriving during a pass triggers another pass. A failed request is recorded in `invocation-error.json` and kept pending until the next invocation.
 
 - An owned branch Simulator is eligible when its recorded worktree disappears, or its latest CoreSimulator/Orchard usage timestamp is **more than one day old**. Filesystem modification times never establish Simulator use. Unknown timestamps do not satisfy the age rule. Discovery does not reset the retention clock.
 - A stopped branch Simulator can also be reclaimed when every live owner is a clean non-default branch whose HEAD is an ancestor of the locally cached `origin/HEAD` target. The normalized branch name must still match the Simulator, protecting worktrees reused for a different branch. This is local ancestry evidence, not a fresh GitHub PR check: no fetch/prune, network requests or Git writes occur; squash merges may remain unrecognized.
 - DerivedData retains the existing **seven-day** or missing-worktree policy.
-- Booted or transitioning Simulators are always preserved, including orphans. Cleanup never shuts down a session. Processes left running from a shut-down Simulator's data directory are terminated before it is deleted; if any survive, the Simulator is preserved. Standard-name devices, private bases, renamed devices and devices without an established owner are preserved.
-- Orchard builds, Simulator preparation and installation hold process-shared leases. A collector skips busy artifacts. External builds and open files/working directories under the owning worktree or Simulator also preserve the device. A dormant shell or attached console may conservatively defer collection. State and usage are rechecked before each deletion. DerivedData collection also defers during external `xcodebuild` activity, when an Xcode build service has that directory open, or when a package checkout contains local changes.
+- A booted Simulator is shut down and collected only when every owning worktree has disappeared. When every existing owner worktree has another branch checked out (a reused folder), the device is only shut down, and the shut-down rules collect it later; files open in that folder then no longer count as use of the device. Detached HEADs and Git errors never count as a switch. Otherwise a booted device is preserved regardless of age or merge state. External use is checked again after the targeted shutdown; a device still in use stays stopped but preserved. Processes left running from a shut-down Simulator's data directory are terminated before it is deleted; if any survive, the Simulator is preserved. Standard-name devices, private bases, renamed devices and devices without an established owner are preserved.
+- Before a Simulator is deleted, its Device Hub window is closed through the macOS Accessibility close button, but only a standalone compact window whose name and runtime match uniquely. `simctl shutdown`/`delete` alone leave the window open. Without Accessibility permission for the app that runs `orchard`, or for tabbed, full or unidentifiable windows, the window is left open, collection continues and the report records `window-left-open`. Device Hub itself is never quit.
+- Orchard builds, Simulator preparation and installation hold process-shared leases. A collector skips busy artifacts. External builds and open files/working directories under the owning worktree or shut-down Simulator also preserve the device. Wrap external tests as `orchard device-use --simulator <UDID> -- xcodebuild ... test` to protect the device until the command exits and to count it as use. A dormant shell or attached console may conservatively defer collection. State and usage are rechecked before each deletion. DerivedData collection also defers during external `xcodebuild` activity, when an Xcode build service has that directory open, or when a package checkout contains local changes.
 - Worktree directories, branches and source files are never deleted. Ownership comes from recorded project paths and configured repositories, including registered external/Codex worktrees. A missing external worktree needs a previously recorded association; names alone are not ownership proof.
 
-Inspect with `orchard cleanup --json`; this does not stop Simulators or delete artifacts. Reports include exact device IDs, names, usage timestamps, candidate sizes and removal/preservation reasons. Size estimates can double-count APFS shared blocks; measure actual free space separately. Inspection may update ownership/report metadata and lock files. Use `orchard cleanup --apply` for an explicit collection; Simulator deletion permanently removes installed apps and in-device data.
+### Accessibility permission for closing Device Hub windows
 
-Limit inspection and application with `--scope simulators`, `--scope derived-data`, or `--scope source-packages` (default: `all`). `--no-discover` uses existing ownership records. For example:
+Windows are closed with the permission of the app that launched `orchard`: `Claude` for the Claude Code desktop app, `Terminal`, `Ghostty`, `iTerm` or similar when run from a terminal, `Codex` for Codex. Grant Accessibility to that app, not to the `orchard` binary.
+
+1. Open System Settings › Privacy & Security › Accessibility:
+
+   ```bash
+   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+   ```
+
+2. Turn the app's switch on. If it is not listed, add it with "+" from `/Applications` (Terminal lives in `/System/Applications/Utilities`).
+3. If the change does not take effect, quit and reopen that app.
+
+Check the result with `orchard cleanup --json` while Device Hub is running: the `"target" : "Device Hub windows"` entry reports `"outcome" : "available"` when granted and `"permission-required"` otherwise. Revoke it by turning the switch off, or reset it by bundle ID, for example `tccutil reset Accessibility com.anthropic.claudefordesktop`. Accessibility lets the app control other apps, so grant it only where needed.
+
+Inspect with `orchard cleanup --json`; this does not stop devices or delete artifacts. Reports include exact device IDs, names, observed state, whether a shutdown is required (`requiresShutdown`), usage timestamps, candidate sizes and removal/preservation reasons. Size estimates can double-count APFS shared blocks; measure actual free space separately. Inspection may update ownership/report metadata and lock files. Use `orchard cleanup --apply` for an explicit collection; Simulator deletion permanently removes installed apps and in-device data.
+
+Limit inspection and application with `--scope devices` (Simulators and marked AVDs), `--scope simulators`, `--scope emulators`, `--scope derived-data`, or `--scope source-packages` (default: `all`). `--no-discover` uses existing ownership records. For example:
 
 ```sh
 orchard cleanup --scope simulators --no-discover
@@ -69,7 +89,19 @@ orchard cleanup --scope simulators --no-discover --apply
 
 Managed SourcePackages entries need a matching owner receipt and a known project record. Only a missing worktree with clean, pinned dependencies and no busy build/cache lease is eligible. Extra files/checkouts, local commits, ignored/untracked files, local/edited dependencies, unknown ownership or inspection errors preserve the entry. Existing caches acquire a receipt the next time this version of Orchard uses them. Templates and live-worktree caches are retained.
 
-Go, Gradle, npm, DeviceSupport and Simulator runtimes are outside this collector's scope. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused.
+Go, Gradle, npm, DeviceSupport and Simulator runtimes are outside this collector's scope. Ownership and the last report live in `~/Library/Application Support/Orchard/Cleanup-v1/`. To exclude a project, put `{"excludedPaths":["/absolute/path/to/project"]}` in that directory's `settings.json`. This is a retention policy, not a disk-size quota; the next use rebuilds deleted products. No cron or LaunchAgent installation is needed. Collection runs when Orchard is used, not while it remains unused. Set `ORCHARD_DISABLE_BACKGROUND_CLEANUP=1` to disable automatic collection in isolated tests.
+
+## Android AVD cleanup
+
+Orchard does not create or run Android emulators; it only deletes AVDs whose owner said so. A tool that creates an AVD for a worktree opts in by writing `orchard-owner.json` inside the AVD directory (`<ANDROID_AVD_HOME>/<name>.avd/`) with the worktree's absolute path:
+
+```json
+{"worktreePath": "/absolute/path/to/worktree", "branch": "feature/example", "lastUsedAt": 1793000000}
+```
+
+`branch` and `lastUsedAt` (Unix seconds) are optional; rewriting the marker on each use records the last use.
+
+When that worktree no longer exists, a running emulator for the AVD is stopped with `emu kill` on its own ADB serial, its disconnect is confirmed, and the AVD is deleted with `avdmanager delete avd`. When the worktree has a branch other than `branch` checked out, a running emulator is stopped, and the AVD is deleted once `lastUsedAt` is more than a day old. Markers without `branch`, and detached HEADs, never trigger this rule. AVDs without the marker are never touched; ownership is never inferred from names or launch directories. A symlinked or unreadable marker, a relative path or an inaccessible worktree preserves the AVD, and age alone never removes one. The Android SDK is located through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, then `~/Library/Android/sdk`; AVDs through `ANDROID_AVD_HOME`, then `~/.android/avd`.
 
 ## Requirements
 
@@ -103,6 +135,11 @@ orchard runs [--json]        # list every recorded run
 orchard runs <id> [--json]   # show one run's detail + log
 orchard runs <id> --log      # print only that run's log
 orchard stop <id>            # stop the run and terminate the launched app
+
+# Devices
+orchard simulator ensure --name <name> [--device-type <type>] [--runtime <runtime>]
+orchard device-use --simulator <udid> [--timeout <seconds>] -- <command> ...
+orchard cleanup [--apply] [--scope <scope>] [--no-discover]
 ```
 
 Branch, scheme, and destination are fuzzy matched (exact → case-insensitive → prefix → substring); a destination UDID matches exactly. Ambiguous input lists the candidates so you can narrow it down.

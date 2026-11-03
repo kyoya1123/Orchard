@@ -19,13 +19,13 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(try SimulatorBaseService.hasNoAppBundles(in: root))
     }
 
-    private func fixture() throws -> (SimulatorBaseService, SimulatorFixture, URL) {
+    private func fixture(closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in }) throws -> (SimulatorBaseService, SimulatorFixture, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("OrchardBaseTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let fake = SimulatorFixture()
         let service = SimulatorBaseService(root: root, destinationSet: root.appendingPathComponent("default"),
-            command: { tool, arguments, _ in try await fake.run(tool, arguments) })
+            closeWindow: closeWindow, command: { tool, arguments, _ in try await fake.run(tool, arguments) })
         return (service, fake, root)
     }
 
@@ -152,7 +152,7 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(calls.contains { $0.contains("delete") })
     }
 
-    func testBootedOldBaseIsNotStoppedOrDeleted() async throws {
+    func testBootedOldEmptyBaseIsStoppedAndDeletedAfterReplacement() async throws {
         let (service, fake, _) = try fixture()
         let first = try await service.prepare()
         await fake.setState(first.udid, "Booted")
@@ -160,7 +160,130 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         let second = try await service.prepare()
         XCTAssertNotEqual(first.udid, second.udid)
         let calls = await fake.calls
+        XCTAssertTrue(calls.contains { $0.contains("shutdown") && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.udid) })
+    }
+
+    func testXcodeUpdateReplacesBaseButKeepsBranchClone() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "branch")
+        await fake.setXcode("Xcode updated")
+        let second = try await service.prepare(name: "branch")
+        XCTAssertEqual(first.udid, second.udid)
+        XCTAssertTrue(second.reused)
+        XCTAssertNotEqual(first.baseUDID, second.baseUDID)
+        let devices = await fake.defaultDevices
+        XCTAssertTrue(devices.contains { $0["udid"] == first.udid })
+    }
+
+    func testRuntimeBuildChangeReplacesShutdownCloneButKeepsBootedOneUntilStopped() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "branch")
+        await fake.setState(first.udid, "Booted")
+        await fake.setRuntimeBuild("24A999")
+        let whileBooted = try await service.prepare(name: "branch")
+        XCTAssertEqual(whileBooted.udid, first.udid)
+        var calls = await fake.calls
         XCTAssertFalse(calls.contains { ($0.contains("shutdown") || $0.contains("delete")) && $0.contains(first.udid) })
+
+        await fake.setState(first.udid, "Shutdown")
+        let replacement = try await service.prepare(name: "branch")
+        XCTAssertNotEqual(replacement.udid, first.udid)
+        XCTAssertFalse(replacement.reused)
+        calls = await fake.calls
+        XCTAssertFalse(calls.contains { $0.contains("shutdown") && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.udid) })
+        let third = try await service.prepare(name: "branch")
+        XCTAssertEqual(third.udid, replacement.udid)
+    }
+
+    func testFailedWindowCloseDoesNotBlockReplacement() async throws {
+        let (service, fake, _) = try fixture(closeWindow: { _, _, _ in throw OrchardError.message("Window close failed") })
+        let first = try await service.prepare(name: "branch")
+        await fake.setRuntimeBuild("24A999")
+        let replacement = try await service.prepare(name: "branch")
+        XCTAssertNotEqual(replacement.udid, first.udid)
+        let calls = await fake.calls
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.udid) })
+        XCTAssertTrue(calls.contains { $0.contains("delete") && $0.contains(first.baseUDID) })
+    }
+
+    func testNewerSDKDoesNotBlockCompatibleOlderRuntimeOrReplaceDevice() async throws {
+        let (service, fake, _) = try fixture()
+        let first = try await service.prepare(name: "branch")
+        await fake.resetCalls()
+        let second = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro", runtime: "iOS 27.0"))
+        XCTAssertEqual(first.udid, second.udid)
+        let calls = await fake.calls
+        XCTAssertFalse(calls.contains { $0.contains("create") || $0.contains("delete") || $0.contains("clone") })
+    }
+
+    func testDifferentModelsAndRuntimesKeepIndependentBasesAndClones() async throws {
+        let (service, fake, root) = try fixture()
+        await fake.enableDuoRuntime()
+        let pro = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro"))
+        let duo = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone Duo"))
+        let older = try await service.prepare(name: "old", selection: .init(deviceType: "iPhone 17 Pro", runtime: "iOS 26.5"))
+        let modern = try await service.prepare(name: "modern", selection: .init(deviceType: "iPhone 17 Pro", runtime: "iOS 27.0"))
+        XCTAssertNotEqual(pro.baseUDID, duo.baseUDID)
+        XCTAssertNotEqual(older.baseUDID, modern.baseUDID)
+        XCTAssertEqual(pro.runtime, "iOS 27.0")
+        XCTAssertEqual(duo.runtime, "iOS 27.1")
+        let reused = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro"))
+        XCTAssertEqual(pro.udid, reused.udid)
+        // A runtime build change only invalidates clones/bases of this model/runtime.
+        await fake.setRuntimeBuild("24A999")
+        _ = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro"))
+        let clones = await fake.defaultDevices
+        XCTAssertFalse(clones.contains { $0["udid"] == pro.udid })
+        for id in [duo.udid, older.udid, modern.udid] { XCTAssertTrue(clones.contains { $0["udid"] == id }) }
+        let registry = try JSONDecoder().decode(SimulatorBaseService.Registry.self, from: Data(contentsOf: root.appendingPathComponent("manifest.json")))
+        XCTAssertEqual(registry.entries.count, 4)
+    }
+
+    func testSavedManagedDestinationKeepsModelAndRuntimeAcrossReruns() async throws {
+        let (service, fake, root) = try fixture()
+        await fake.enableDuoRuntime()
+        let pro = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro"))
+        let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(await fake.catalog().utf8))
+        let registry = try JSONDecoder().decode(SimulatorBaseService.Registry.self, from: Data(contentsOf: root.appendingPathComponent("manifest.json")))
+        let selected = try SimulatorBaseService.managedSelection(id: pro.udid, name: pro.name, catalog: catalog, clones: registry.clones ?? [])
+        XCTAssertEqual(try catalog.resolve(selected).0.name, "iPhone 18 Pro")
+        XCTAssertEqual(try catalog.resolve(selected).1.name, "iOS 27.0")
+        let missing = SimulatorCatalog(devicetypes: catalog.devicetypes, runtimes: catalog.runtimes, devices: [:])
+        let recovered = try SimulatorBaseService.managedSelection(id: pro.udid, name: pro.name, catalog: missing, clones: registry.clones ?? [])
+        XCTAssertEqual(recovered.deviceType, selected.deviceType)
+        XCTAssertEqual(recovered.runtime, selected.runtime)
+        XCTAssertThrowsError(try SimulatorBaseService.managedSelection(id: "unknown", name: "branch", catalog: missing, clones: []))
+    }
+
+    func testIncompatibleExplicitRuntimeDoesNotCreateOrDeleteAnything() async throws {
+        let (service, fake, _) = try fixture()
+        await fake.enableDuoRuntime()
+        do {
+            _ = try await service.prepare(name: "branch", selection: .init(deviceType: "iPhone 18 Pro", runtime: "iOS 27.1"))
+            XCTFail("Unsupported pair must fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("Compatible installed runtimes: iOS 27.0"))
+        }
+        let calls = await fake.calls
+        XCTAssertFalse(calls.contains { $0.contains("create") || $0.contains("delete") || $0.contains("clone") })
+    }
+
+    func testRuntimeNumericSelectionAndCompatibilityMetadata() throws {
+        let type = SimulatorCatalog.DeviceType(identifier: "phone", name: "iPhone 18 Pro", productFamily: nil,
+            modelIdentifier: "iPhone19,2", minRuntimeVersion: 27 << 16, maxRuntimeVersion: UInt64.max)
+        let runtimes: [SimulatorCatalog.Runtime] = ["27.0.1", "27.1", "27.2", "27.10"].map {
+            .init(identifier: "com.apple.iOS-" + $0, name: "iOS " + $0, version: $0, buildversion: $0,
+                  isAvailable: true, supportedDeviceTypes: $0 == "27.10" ? [] : nil)
+        }
+        let catalog = SimulatorCatalog(devicetypes: [type], runtimes: runtimes, devices: [:])
+        XCTAssertEqual(try catalog.resolve(.init()).1.version, "27.2")
+        XCTAssertEqual(try catalog.resolve(.init(runtime: "iOS 27.0.1")).1.version, "27.0.1")
+        XCTAssertThrowsError(try catalog.resolve(.init(deviceType: type.name, runtime: "iOS 27.10")))
+        let unknown = SimulatorCatalog.DeviceType(identifier: "phone", name: type.name, productFamily: nil,
+            modelIdentifier: nil, minRuntimeVersion: nil, maxRuntimeVersion: nil)
+        XCTAssertThrowsError(try SimulatorCatalog(devicetypes: [unknown], runtimes: runtimes, devices: [:]).resolve(.init()))
     }
 
     func testBaseWithUserAppIsNeitherClonedNorDeleted() async throws {
@@ -235,7 +358,9 @@ private actor SimulatorFixture {
     var userApps: Set<String> = []
     var privateSet: String?
     var deleteAfterCatalog = false
+    var duoRuntime = false
 
+    func enableDuoRuntime() { duoRuntime = true }
     func deleteBranchesAfterNextCatalog() { deleteAfterCatalog = true }
 
     func setXcode(_ value: String) { xcode = value }
@@ -250,6 +375,7 @@ private actor SimulatorFixture {
     }
     func setState(_ id: String, _ state: String) {
         if let i = privateDevices.firstIndex(where: { $0["udid"] == id }) { privateDevices[i]["state"] = state }
+        if let i = defaultDevices.firstIndex(where: { $0["udid"] == id }) { defaultDevices[i]["state"] = state }
     }
     func rename(_ id: String, _ name: String) {
         if let i = privateDevices.firstIndex(where: { $0["udid"] == id }) { privateDevices[i]["name"] = name }
@@ -261,8 +387,11 @@ private actor SimulatorFixture {
         return item["udid"]!
     }
 
-    private func device(_ name: String, state: String) -> [String: String] {
-        ["udid": UUID().uuidString, "name": name, "state": state, "deviceTypeIdentifier": "type18"]
+    private func device(_ name: String, state: String, type: String = "type18", runtime: String = "com.apple.iOS-27-0") -> [String: String] {
+        ["udid": UUID().uuidString, "name": name, "state": state, "deviceTypeIdentifier": type, "runtime": runtime]
+    }
+    private func grouped(_ devices: [[String: String]]) -> [String: [[String: Any]]] {
+        Dictionary(grouping: devices, by: { $0["runtime"]! }).mapValues(devicesJSON)
     }
     private func encoded(_ value: Any) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
@@ -276,16 +405,19 @@ private actor SimulatorFixture {
                 ["name": "iPhone 18 Pro Max", "identifier": "type18max", "modelIdentifier": "iPhone19,3"],
                 ["name": "iPhone 17 Pro", "identifier": "type17", "modelIdentifier": "iPhone18,1"],
                 ["name": "iPhone 18 Pro", "identifier": "type18", "modelIdentifier": "iPhone19,2"],
-                ["name": "iPad Pro", "identifier": "ipad", "modelIdentifier": "iPad99,1"]
+                ["name": "iPad Pro", "identifier": "ipad", "modelIdentifier": "iPad99,1"],
+                ["name": "iPhone Duo", "identifier": "duo", "modelIdentifier": "iPhone19,4"]
             ],
             "runtimes": [
                 ["name": "iOS 28.0", "identifier": "com.apple.iOS-28-0", "version": "28.0", "buildversion": "25A1", "isAvailable": false],
+                ["name": "iOS 27.1", "identifier": "com.apple.iOS-27-1", "version": "27.1", "buildversion": "24A94425", "isAvailable": duoRuntime,
+                 "supportedDeviceTypes": [["identifier": "duo"]]],
                 ["name": "iOS 26.5", "identifier": "com.apple.iOS-26-5", "version": "26.5", "buildversion": "23F1", "isAvailable": true,
                  "supportedDeviceTypes": [["identifier": "type17"]]],
                 ["name": "iOS 27.0", "identifier": "com.apple.iOS-27-0", "version": "27.0", "buildversion": runtimeBuild, "isAvailable": true,
                  "supportedDeviceTypes": [["identifier": "type18"], ["identifier": "type18max"], ["identifier": "type17"], ["identifier": "ipad"]]]
             ],
-            "devices": ["com.apple.iOS-27-0": devicesJSON(defaultDevices)]
+            "devices": grouped(defaultDevices)
         ])
     }
 
@@ -305,9 +437,9 @@ private actor SimulatorFixture {
         case "list":
             if args == ["list", "-j"] { return try catalog() }
             let listed = arguments[1].hasSuffix("/default") ? defaultDevices : privateDevices
-            return try encoded(["devices": ["com.apple.iOS-27-0": devicesJSON(listed)]])
+            return try encoded(["devices": grouped(listed)])
         case "create":
-            let new = device(args[1], state: "Shutdown")
+            let new = device(args[1], state: "Shutdown", type: args[2], runtime: args[3])
             privateDevices.append(new)
             privateSet = arguments[1]
             try FileManager.default.createDirectory(at: URL(fileURLWithPath: arguments[1])
@@ -324,12 +456,13 @@ private actor SimulatorFixture {
             let data = try PropertyListSerialization.data(fromPropertyList: ["app": ["ApplicationType": appType]], format: .xml, options: 0)
             return String(decoding: data, as: UTF8.self)
         case "clone":
-            let new = device(args[2], state: "Shutdown")
+            let base = privateDevices.first { $0["udid"] == args[1] }!
+            let new = device(args[2], state: "Shutdown", type: base["deviceTypeIdentifier"]!, runtime: base["runtime"]!)
             defaultDevices.append(new)
             return new["udid"]!
         case "delete":
-            guard arguments[1].hasSuffix("/devices") else { throw OrchardError.message("Tried to delete default device!") }
-            privateDevices.removeAll { $0["udid"] == args[1] }
+            if arguments[1].hasSuffix("/devices") { privateDevices.removeAll { $0["udid"] == args[1] } }
+            else { defaultDevices.removeAll { $0["udid"] == args[1] } }
         default: throw OrchardError.message("Unexpected command \(args)")
         }
         return ""

@@ -20,7 +20,11 @@ git worktree ベースのワークフローを前提に設計されています�
 
 baseは新規作成 → 初回起動完了を待機 → システムアプリのみであることを確認 → 停止、の手順で準備します。アプリのインストールやアプリ用の設定は行いません。通常の実行先に表示されない専用device set（`~/Library/Application Support/Orchard/SimulatorBases-v1/devices`）で管理します。機種・iOSのビルド・Xcodeのビルドとツールパス・初期化方式が一致するbaseは再利用し、変更時に作り直します。
 
-新baseの準備と必要な複製が成功した後、管理台帳にある旧baseを削除します。起動中・名前や機種が変更されたもの・ユーザーアプリの入ったものは残し、診断を表示します。初期化や複製に失敗した場合は旧baseを残します。ブランチ用Simulator、アプリデータ、管理対象外のSimulator（従来の `base` という名前のものも含む）は削除しません。複数プロセスによる同時作成はロックで防ぎます。既存Simulatorの圧縮や、利用中に増えるログの削減を行う機能ではありません。
+baseは機種とruntimeごとに共存します。新baseの準備と必要な複製が成功した後、同じ機種・runtimeの旧baseだけを削除します。起動中の旧baseは停止してから削除します。名前や機種が変更されたもの・ユーザーアプリの入ったものは残し、診断を表示します。初期化や複製に失敗した場合は旧baseを残します。管理対象外のSimulator（従来の `base` という名前のものも含む）は削除しません。複数プロセスによる同時作成はロックで防ぎます。既存Simulatorの圧縮や、利用中に増えるログの削減を行う機能ではありません。
+
+Orchardが複製したブランチ用Simulatorは、Xcodeやsimctlの更新だけでは作り直しません。同じruntimeのビルドが変わった場合だけ、停止中の旧Simulatorを削除して同じ名前で複製し直します。起動中のものはそのまま使い続け、停止後の次回準備で置き換えます。別の機種・runtimeを選んでも、他のSimulatorは削除しません。`--destination` で指定した管理対象Simulatorも同じ手順で解決し直すため、置き換え前の古いUDIDで起動することはありません。
+
+`--runtime` を省略すると、指定機種に対応するインストール済みの最新iOSを選びます。`simctl` のruntime別対応機種一覧を優先し、一覧がない場合は機種の最小・最大runtimeで確認します。対応しない組み合わせは、作成・削除の前に対応runtimeの一覧付きでエラーにします。
 
 ```bash
 # baseだけを準備・更新。アプリのビルドやインストールは行わない
@@ -45,14 +49,42 @@ Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使い�
 
 ## バックグラウンドでの整理
 
-ブランチ用Simulatorの準備時と、依存解決・ビルドの前後に不要な成果物を確認します。整理はCPU・ディスクI/Oの優先度を下げた別プロセスで動かします。同時に複数回呼ばれても、プロセス間ロックで整理を1つにまとめます。
+ブランチ用Simulatorの準備時と、依存解決・ビルドの前後に不要な成果物を確認します。さらに`run`・`list`・`runs`・`simulator`を呼ぶたびに、既存の所有記録だけを使って端末（Simulatorと目印付きのAVD）を確認します。整理はCPU優先度を下げた別プロセスで動かし、`simctl`・`adb`・`avdmanager`の呼び出しだけはutility QoSで実行して停止を防ぎます。同時要求はまとめ、整理中に届いた要求は次の検査で処理します。失敗した要求は`invocation-error.json`に記録して次回の呼び出しまで保留します。
 
-- 対応するworktreeのディレクトリが存在しない、または最終利用から**7日間**経過したSimulator・DerivedDataを削除対象にします。一覧の再検出では利用日時を更新しません。
-- 起動中・起動処理中のSimulatorは常に残し、整理のために終了させることはありません。停止済みのSimulatorのデータディレクトリから動き続けているプロセスは、削除前に終了させます。終了できないプロセスが残った場合は削除しません。標準名の端末、専用base、名前を変更した端末、所有者が分からない端末は保護します。
-- Orchardのビルド・Simulator準備・インストール中はロックで保護します。コンソール接続だけでは、worktree消失後の端末を保持し続けません。外部の`xcodebuild`が実行中、Xcodeのビルドサービスが当該DerivedDataを開いている、またはパッケージcheckoutにローカル変更がある場合もDerivedDataの削除を見送ります。
+- 対応するworktreeのディレクトリが存在しないSimulator・DerivedDataを削除対象にします。worktreeが残っている場合、DerivedDataは最終利用から**7日間**、停止中のSimulatorは**1日**を超えたもの、またはキャッシュ済みの既定ブランチへマージ済みと確認できたものが対象です。一覧の再検出では利用日時を更新しません。
+- 起動中のSimulatorは、所有するworktreeがすべて消えた場合だけ停止して削除します。所有するworktreeがすべて別ブランチに切り替わっている場合（フォルダの使い回し）は停止だけを行い、その後は停止中の規則で整理します。この場合、そのフォルダで開かれているファイルは利用中の根拠にしません。detached HEADやGitの判定に失敗したworktreeは切り替えとみなしません。それ以外で起動中のものは、古さやマージ状況によらず残します。停止後も外部の利用がないかを再確認し、利用があれば停止したまま残します。停止済みのSimulatorのデータディレクトリから動き続けているプロセスは、削除前に終了させます。終了できないプロセスが残った場合は削除しません。標準名の端末、専用base、名前を変更した端末、所有者が分からない端末は保護します。
+- 削除するSimulatorのDevice Hubのウィンドウは、名前とruntimeが一意に一致する独立したcompactウィンドウだけを、macOSのアクセシビリティで閉じます。`simctl shutdown`・`delete`だけではウィンドウは閉じません。`orchard`を実行するアプリにアクセシビリティの許可がない場合や、タブ・fullウィンドウ・識別できないウィンドウの場合は閉じずに整理を続け、レポートに`window-left-open`を残します。Device Hub全体は終了しません。
+- Orchardのビルド・Simulator準備・インストール中はロックで保護します。コンソール接続だけでは、worktree消失後の端末を保持し続けません。外部のテストなどで端末を使う場合は`orchard device-use --simulator <UDID> -- xcodebuild ... test`のように実行すると、終了まで保護し、最終利用日時も更新します。外部の`xcodebuild`が実行中、Xcodeのビルドサービスが当該DerivedDataを開いている、またはパッケージcheckoutにローカル変更がある場合もDerivedDataの削除を見送ります。
 - worktree自体、Gitブランチ、ソースファイルは削除しません。記録したプロジェクトのパスと設定済みリポジトリから所有者を特定し、Codexなど外部にあるworktreeも対象にします。既に消えた外部worktreeは過去の対応記録が必要で、名前だけから所有者を推測しません。
 
-`orchard cleanup --json`で削除候補を確認できます。このコマンドではSimulator停止や成果物の削除を行いません。明示的に整理する場合は`orchard cleanup --apply`を使います。所有者と直近の結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。特定プロジェクトを除外するには、このディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。
+### Device Hubのウィンドウを閉じるためのアクセシビリティ権限
+
+ウィンドウを閉じる操作は、`orchard`を起動したアプリ（Claude Codeのデスクトップアプリなら`Claude`、ターミナルから実行するなら`Terminal`・`Ghostty`・`iTerm`など、Codexなら`Codex`）の権限で行われます。`orchard`本体ではなく、そのアプリにアクセシビリティを許可してください。
+
+1. 次のコマンドで「システム設定 › プライバシーとセキュリティ › アクセシビリティ」を開きます。
+
+   ```bash
+   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+   ```
+
+2. 一覧に対象のアプリがあればスイッチをオンにします。なければ「+」から`/Applications`（Terminalは`/System/Applications/Utilities`）のアプリを追加します。
+3. 反映されない場合は、そのアプリを終了して開き直します。
+
+許可した状態は`orchard cleanup --json`で確認できます。Device Hubの起動中に`"target" : "Device Hub windows"`の項目が`"outcome" : "available"`なら許可済み、`"permission-required"`なら未許可です。許可を取り消すには同じ画面でスイッチをオフにします（`tccutil reset Accessibility com.anthropic.claudefordesktop`のようにバンドルIDを指定してリセットもできます）。アクセシビリティは許可したアプリが他のアプリを操作できるようにする権限なので、必要なアプリだけに付けてください。
+
+`orchard cleanup --json`で削除候補を確認できます。このコマンドでは端末の停止や成果物の削除を行いません。各候補には状態と停止の必要性（`requiresShutdown`）を表示します。明示的に整理する場合は`orchard cleanup --apply`を使います。`--scope`で`devices`（Simulatorと目印付きのAVD）・`simulators`・`emulators`・`derived-data`・`source-packages`に限定できます。所有者と直近の結果は`~/Library/Application Support/Orchard/Cleanup-v1/`に保存します。特定プロジェクトを除外するには、このディレクトリの`settings.json`に`{"excludedPaths":["/absolute/path/to/project"]}`を設定します。隔離テストでは`ORCHARD_DISABLE_BACKGROUND_CLEANUP=1`で自動整理を無効にできます。
+
+## Android AVDの整理
+
+OrchardはAndroidエミュレーターの作成や起動を行わず、持ち主が目印を付けたAVDの削除だけを行います。worktree用にAVDを作るツールは、AVDのディレクトリ（`<ANDROID_AVD_HOME>/<name>.avd/`）に、worktreeの絶対パスを書いた`orchard-owner.json`を置きます。
+
+```json
+{"worktreePath": "/absolute/path/to/worktree", "branch": "feature/example", "lastUsedAt": 1793000000}
+```
+
+`branch`と`lastUsedAt`（Unix秒）は省略できます。AVDを使うたびに書き直すと、利用日時として扱います。
+
+そのworktreeが存在しなくなると、起動中なら対応するADBシリアルだけを`emu kill`で停止し、切断を確認してから`avdmanager delete avd`で削除します。worktreeが`branch`とは別のブランチに切り替わっている場合は、起動中なら停止し、`lastUsedAt`から1日を超えたら削除します。`branch`がない目印やdetached HEADでは、この規則を適用しません。目印のないAVDには一切触れず、名前や起動したディレクトリから所有者を推測しません。目印がシンボリックリンク・読めない・相対パスの場合や、worktreeにアクセスできない場合は残します。経過時間だけでは削除しません。Android SDKは`ANDROID_HOME`・`ANDROID_SDK_ROOT`・`~/Library/Android/sdk`、AVDの保存先は`ANDROID_AVD_HOME`・`~/.android/avd`の順に探します。
 
 これは保持期間の制御で、容量の上限ではありません。削除した成果物は次回利用時に再ビルドします。cronやLaunchAgentの登録は不要です。Orchardを使わない間は整理せず、次の利用時に実行します。
 
@@ -88,6 +120,11 @@ orchard runs [--json]        # 記録されたすべての Run を一覧
 orchard runs <id> [--json]   # 特定の Run の詳細 + ログを表示
 orchard runs <id> --log      # その Run のログだけを出力
 orchard stop <id>            # Run を停止し、起動したアプリを終了
+
+# 端末
+orchard simulator ensure --name <name> [--device-type <type>] [--runtime <runtime>]
+orchard device-use --simulator <udid> [--timeout <seconds>] -- <command> ...
+orchard cleanup [--apply] [--scope <scope>] [--no-discover]
 ```
 
 ブランチ・スキーム・実行先はあいまいマッチで解決されます(完全一致 → 大文字小文字無視 → 前方一致 → 部分一致)。実行先の UDID は完全一致のみです。入力が曖昧な場合は候補が一覧表示されるので、絞り込んで再実行できます。
