@@ -13,7 +13,8 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let commands: CleanupCommands
     }
 
-    func fixture(existing: Bool = true, realGit: Bool = false) throws -> Fixture {
+    func fixture(existing: Bool = true, realGit: Bool = false,
+                 closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in }) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("Orchard Cleanup Tests-\(UUID().uuidString)").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -29,7 +30,9 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let commands = CleanupCommands()
         let date = clock
         let worker = ArtifactCleanup(store: store, derivedData: root.appendingPathComponent("DerivedData"),
-            devices: root.appendingPathComponent("Devices"), now: { date }, command: { tool, args in
+            devices: root.appendingPathComponent("Devices"),
+            toolchain: AndroidToolchain(home: root, environment: [:]), now: { date },
+            closeWindow: closeWindow, command: { tool, args in
                 if realGit && tool == "/usr/bin/git" {
                     return try await ProcessRunner.run(executableURL: URL(fileURLWithPath: tool),
                         arguments: args, currentDirectoryURL: nil)
@@ -60,16 +63,109 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         return path
     }
 
-    func testBootedOrphanIsPreservedEvenWhenWorktreeIsMissing() async throws {
-        let f = try fixture(existing: false)
+    func testBootedOrphanIsWindowClosedStoppedAndRemovedWhenWorktreeIsMissing() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(existing: false, closeWindow: { name, runtime, unique in await closed.add("\(name)|\(runtime)|\(unique)") })
         let id = try await simulator(f, state: "Booted")
         let dd = try cache(f)
         let report = await f.worker.run(apply: true, discover: false)
         XCTAssertNil(report.error)
         let calls = await f.commands.verbs
-        XCTAssertTrue(calls.filter { ["shutdown", "delete"].contains($0) }.isEmpty)
+        XCTAssertEqual(calls.filter { ["shutdown", "delete"].contains($0) }, ["shutdown", "delete"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: dd.path))
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "missing-worktree" && $0.outcome == "removed" })
+        let windows = await closed.items
+        XCTAssertEqual(windows, ["feature-example|runtime|true"])
+    }
+
+    func testBootedOrphanPreviewDoesNotStopAndReportsShutdown() async throws {
+        let f = try fixture(existing: false)
+        let id = try await simulator(f, state: "Booted")
+        let report = await f.worker.run(apply: false, discover: false)
+        let calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains { ["shutdown", "delete"].contains($0) })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "would-remove" && $0.requiresShutdown == true })
+    }
+
+    func testBootedDeviceOfExistingWorktreeIsPreservedEvenWhenOld() async throws {
+        let f = try fixture()
+        let id = try await simulator(f, state: "Booted", age: ArtifactCleanup.retention)
+        await f.commands.setDates(id, used: nil, booted: nil)
+        let report = await f.worker.run(apply: true, discover: false)
+        let calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains { ["shutdown", "delete"].contains($0) })
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "booted-or-transitioning" && $0.outcome == "preserved" })
+    }
+
+    func testBootedDeviceOfFolderReusedForAnotherBranchIsOnlyStopped() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(closeWindow: { name, _, _ in await closed.add(name) })
+        let id = try await simulator(f, state: "Booted")
+        await f.commands.setMerge("renamed-branch", worktree: f.owner.worktreePath)
+        let preview = await f.worker.run(apply: false, discover: false)
+        XCTAssertTrue(preview.actions.contains { $0.target == id && $0.reason == "branch-switched" && $0.outcome == "would-stop" })
+        var calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains("shutdown"))
+
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertNil(report.error)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "branch-switched" && $0.outcome == "stopped" })
+        calls = await f.commands.verbs
+        XCTAssertTrue(calls.contains("shutdown"))
+        XCTAssertFalse(calls.contains("delete"))
+        let windows = await closed.items
+        XCTAssertEqual(windows, ["feature-example"])
+    }
+
+    func testFilesOpenedByTheReusedFolderDoNotPinTheOldBranchDevice() async throws {
+        let f = try fixture()
+        let id = try await simulator(f, age: ArtifactCleanup.simulatorRetention + 60)
+        await f.commands.setDates(id, used: nil, booted: nil)
+        await f.commands.setOpenPath(f.owner.worktreePath + "/Source.swift")
+        await f.commands.setMerge("renamed-branch", worktree: f.owner.worktreePath)
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "unused-over-1-day" && $0.outcome == "removed" })
+
+        let same = try fixture()
+        let kept = try await simulator(same, age: ArtifactCleanup.simulatorRetention + 60)
+        await same.commands.setDates(kept, used: nil, booted: nil)
+        await same.commands.setOpenPath(same.owner.worktreePath + "/Source.swift")
+        await same.commands.setMerge("feature", worktree: same.owner.worktreePath)
+        let preserved = await same.worker.run(apply: true, discover: false)
+        XCTAssertTrue(preserved.actions.contains { $0.target == kept && $0.reason == "external-use" })
+    }
+
+    func testBootedDeviceOfSameBranchOrDetachedHeadKeepsRunning() async throws {
+        for mode in ["feature", "detached"] {
+            let f = try fixture()
+            let id = try await simulator(f, state: "Booted")
+            await f.commands.setMerge(mode, worktree: f.owner.worktreePath)
+            let report = await f.worker.run(apply: true, discover: false)
+            let calls = await f.commands.verbs
+            XCTAssertFalse(calls.contains("shutdown"), mode)
+            XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "booted-or-transitioning" }, mode)
+        }
+    }
+
+    func testWindowCloseFailureDoesNotPreventRemoval() async throws {
+        let f = try fixture(existing: false, closeWindow: { _, _, _ in throw OrchardError.message("Window close requires Accessibility permission") })
+        let id = try await simulator(f)
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason.hasPrefix("window-left-open") })
+    }
+
+    func testDeviceUseReceiptKeepsShutdownDeviceRecent() async throws {
+        let f = try fixture()
+        let id = try await simulator(f, age: ArtifactCleanup.simulatorRetention + 60)
+        await f.commands.setDates(id, used: nil, booted: nil)
+        let lease = try XCTUnwrap(ArtifactLease.tryAcquire(f.store.simulatorLock(id), shared: true))
+        let activity = try DeviceActivity(store: f.store, device: id, lease: lease, now: { self.clock })
+        activity.finish(scheduleCleanup: false)
+        let report = await f.worker.run(apply: true, discover: false)
+        let calls = await f.commands.verbs
+        XCTAssertFalse(calls.contains("delete"))
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "preserved" })
     }
 
     func testExistingWorktreeSevenDayBoundaryAndSourceArePreserved() async throws {
@@ -371,6 +467,11 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(f.worker.owner(for: f.owner.projectPath, known: known + [ArtifactProject(owner: f.owner, lastUsedAt: 0)]), f.owner)
         XCTAssertFalse(ArtifactCleanup.contains("/repo-other/App.xcodeproj", in: "/repo"))
     }
+}
+
+actor ClosedWindows {
+    var items: [String] = []
+    func add(_ item: String) { items.append(item) }
 }
 
 actor CleanupCommands {

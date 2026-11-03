@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct PreparedSimulator: Encodable, Sendable {
@@ -9,28 +10,35 @@ public struct PreparedSimulator: Encodable, Sendable {
     public let baseUDID: String
 }
 
-/// Only templates live in the private device set. Branch devices live in the
-/// default set and are never erased, stopped, or deleted by this service.
+/// Templates have a private set. Registered clones in the default set are
+/// replaced only after their runtime build changed, and only while shut down.
 public struct SimulatorBaseService: Sendable {
     typealias Command = @Sendable (String, [String], TimeInterval) async throws -> String
     private let root: URL
     private let destinationSet: URL
     private let command: Command
+    private let store: ArtifactStore
+    private let closeWindow: @Sendable (String, String, Bool) async throws -> Void
 
     public init() {
         self.init(root: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Orchard/SimulatorBases-v1"),
                   destinationSet: FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Developer/CoreSimulator/Devices"))
+            .appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
+                  store: ArtifactStore(),
+                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, uniqueDevice: $2) })
     }
 
-    init(root: URL, destinationSet: URL,
+    init(root: URL, destinationSet: URL, store: ArtifactStore? = nil,
+         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
          command: @escaping Command = { tool, arguments, timeout in
              try await SimulatorProcess.run(tool: tool, arguments: arguments, timeout: timeout)
          }) {
         self.root = root
         self.destinationSet = destinationSet
         self.command = command
+        self.store = store ?? ArtifactStore(root: root.appendingPathComponent("ownership"))
+        self.closeWindow = closeWindow
     }
 
     /// Cleanup recognizes a merged branch's Simulator by this same name.
@@ -59,9 +67,19 @@ public struct SimulatorBaseService: Sendable {
                                           runtimeBuild: runtime.buildversion, xcode: xcode,
                                           simctlPath: simctlPath, revision: 1)
         var registry = try loadRegistry()
+        // Adopt only exact, previously recorded UDID/name associations. Names alone
+        // never authorize replacing someone else's default-set device.
+        for record in try store.all(ArtifactSimulator.self, in: "simulators")
+            where !record.owners.isEmpty && !ArtifactStore.isStandardSimulator(record.name) {
+            if !(registry.clones ?? []).contains(where: { $0.udid == record.udid }),
+               let pair = catalog.devices.first(where: { $0.value.contains { $0.udid == record.udid && $0.name == record.name } }) {
+                registry.clones = (registry.clones ?? []) + [Clone(udid: record.udid, name: record.name, runtime: pair.key, configuration: nil)]
+            }
+        }
         var branchMatches = name.map { name in
             (catalog.devices[runtime.identifier] ?? []).filter {
                 $0.isAvailable && $0.name == name && $0.deviceTypeIdentifier == type.identifier
+                    && Self.canReuse($0, clones: registry.clones ?? [], configuration: configuration)
             }
         } ?? []
         guard branchMatches.count <= 1 else {
@@ -76,6 +94,7 @@ public struct SimulatorBaseService: Sendable {
                 from: Data(try await simctl(["list", "devices", "-j"]).utf8))
             branchMatches = (fresh.devices[runtime.identifier] ?? []).filter {
                 $0.isAvailable && $0.name == name && $0.deviceTypeIdentifier == type.identifier
+                    && Self.canReuse($0, clones: registry.clones ?? [], configuration: configuration)
             }
             guard branchMatches.isEmpty || (branchMatches.count == 1 && branchMatches[0].udid == existing.udid) else {
                 throw OrchardError.message("Simulator changed while preparing it; retry the command.")
@@ -135,6 +154,8 @@ public struct SimulatorBaseService: Sendable {
             progress("Cloning base for \(name)")
             let id = try await simctl(["clone", base.udid, name, destinationSet.path], privateSet: true)
             guard UUID(uuidString: id) != nil else { throw OrchardError.message("simctl clone returned an invalid UDID.") }
+            registry.clones = (registry.clones ?? []) + [Clone(udid: id, name: name, runtime: runtime.identifier, configuration: configuration)]
+            try save(registry)
             result = PreparedSimulator(udid: id, name: name, deviceType: type.name,
                                        runtime: runtime.name, reused: false, baseUDID: base.udid)
         } else {
@@ -146,13 +167,14 @@ public struct SimulatorBaseService: Sendable {
             try await activity?.useSimulator(udid: result.udid, name: result.name)
         }
         // Clone first: a clone failure must not discard the previous template.
-        try await prune(registry: &registry, keeping: base.udid, progress: progress)
+        try await pruneClones(registry: &registry, configuration: configuration, keeping: result.udid, progress: progress)
+        try await prune(registry: &registry, keeping: base.udid, configuration: configuration, progress: progress)
         return result
     }
 
-    private func prune(registry: inout Registry, keeping id: String,
+    private func prune(registry: inout Registry, keeping id: String, configuration: Configuration,
                        progress: @Sendable (String) -> Void) async throws {
-        for entry in registry.entries where entry.udid != id {
+        for entry in registry.entries where entry.udid != id && entry.configuration.hasSameTarget(as: configuration) {
             do {
                 let devices = try await baseDevices()
                 guard let device = devices.devices[entry.configuration.runtime]?.first(where: { $0.udid == entry.udid }) else {
@@ -160,7 +182,7 @@ public struct SimulatorBaseService: Sendable {
                     try save(registry)
                     continue
                 }
-                guard matches(device, entry), device.state == "Shutdown" else {
+                guard matches(device, entry), ["Shutdown", "Booted"].contains(device.state) else {
                     progress("Preserving busy or changed base \(entry.udid).")
                     continue
                 }
@@ -169,6 +191,17 @@ public struct SimulatorBaseService: Sendable {
                 guard try hasNoAppBundles(entry.udid) else {
                     progress("Preserving base with user-installed apps: \(entry.udid).")
                     continue
+                }
+                do {
+                    try await closeWindow(entry.name, entry.configuration.runtime, true)
+                } catch {
+                    progress("Device Hub window for base \(entry.udid) left open: \(error)")
+                }
+                if device.state == "Booted" {
+                    _ = try await simctl(["shutdown", entry.udid], privateSet: true)
+                    guard try await baseDevices().devices[entry.configuration.runtime]?.contains(where: {
+                        $0.udid == entry.udid && $0.state == "Shutdown" && matches($0, entry)
+                    }) == true else { throw OrchardError.message("Base shutdown unconfirmed") }
                 }
                 _ = try await simctl(["delete", entry.udid], privateSet: true)
                 registry.entries.removeAll { $0.udid == entry.udid }
@@ -238,6 +271,10 @@ public struct SimulatorBaseService: Sendable {
         let xcode: String
         let simctlPath: String
         let revision: Int
+
+        func hasSameTarget(as other: Configuration) -> Bool {
+            deviceType == other.deviceType && runtime == other.runtime
+        }
     }
     struct Entry: Codable, Sendable {
         let udid: String
@@ -245,7 +282,107 @@ public struct SimulatorBaseService: Sendable {
         let configuration: Configuration
         var ready: Bool
     }
-    struct Registry: Codable { var entries: [Entry] = [] }
+    struct Clone: Codable, Sendable { let udid: String; let name: String; let runtime: String; let configuration: Configuration? }
+    struct Registry: Codable { var entries: [Entry] = []; var clones: [Clone]? }
+
+    /// Xcode or simctl updates alone keep a clone usable. A runtime build change
+    /// replaces it, but a booted clone stays in use until it is shut down.
+    static func canReuse(_ device: SimulatorCatalog.Device, clones: [Clone], configuration: Configuration) -> Bool {
+        guard let recorded = clones.first(where: { $0.udid == device.udid })?.configuration else { return true }
+        return !isObsolete(recorded, for: configuration) || device.state != "Shutdown"
+    }
+
+    static func isObsolete(_ recorded: Configuration, for configuration: Configuration) -> Bool {
+        recorded.hasSameTarget(as: configuration) && recorded.runtimeBuild != configuration.runtimeBuild
+    }
+
+    private func pruneClones(registry: inout Registry, configuration: Configuration, keeping id: String,
+                             progress: @Sendable (String) -> Void) async throws {
+        var actions: [CleanupReport.Action] = []
+        for clone in registry.clones ?? [] where clone.udid != id
+            && clone.configuration.map({ Self.isObsolete($0, for: configuration) }) == true {
+            do {
+                guard let lease = try ArtifactLease.tryAcquire(store.simulatorLock(clone.udid)) else {
+                    actions.append(.init(target: clone.udid, reason: "active-build-or-test", outcome: "preserved", name: clone.name)); continue
+                }
+                defer { lease.close() }
+                if let owner = try store.read(ArtifactSimulator.self, at: store.simulatorURL(clone.udid)) {
+                    guard owner.name == clone.name, !owner.owners.isEmpty else { continue }
+                    for path in Set(owner.owners.map(\.worktreePath)) { _ = try MissingWorktree.check(path) }
+                }
+                func current() async throws -> SimulatorCatalog.Device? {
+                    let list = try JSONDecoder().decode(DeviceList.self, from: Data(try await simctl(["list", "devices", "-j"]).utf8))
+                    return list.devices[clone.runtime]?.first(where: { $0.udid == clone.udid })
+                }
+                guard let device = try await current() else {
+                    registry.clones?.removeAll { $0.udid == clone.udid }; try save(registry); continue
+                }
+                guard device.name == clone.name, device.state == "Shutdown" else {
+                    actions.append(.init(target: clone.udid, reason: "booted-or-transitioning", outcome: "preserved", name: clone.name)); continue
+                }
+                // The replacement shares this name and runtime, so its window title
+                // is ambiguous and the close attempt is expected to be skipped.
+                do {
+                    try await closeWindow(clone.name, clone.runtime, false)
+                } catch {
+                    progress("Device Hub window for \(clone.name) (\(clone.udid)) left open: \(error)")
+                }
+                guard let stopped = try await current(), stopped.name == clone.name, stopped.state == "Shutdown" else {
+                    throw OrchardError.message("Old managed device state changed before deletion")
+                }
+                _ = try await simctl(["delete", clone.udid])
+                guard try await current() == nil else { throw OrchardError.message("Old managed device deletion unconfirmed") }
+                registry.clones?.removeAll { $0.udid == clone.udid }
+                try save(registry)
+                // Keep the lightweight ownership receipt so a saved rerun can resolve
+                // its branch name to the replacement instead of launching a stale UDID.
+                actions.append(.init(target: clone.udid, reason: "obsolete-runtime-build", outcome: "removed", name: clone.name))
+                progress("Removed obsolete managed Simulator \(clone.name) (\(clone.udid)).")
+            } catch {
+                actions.append(.init(target: clone.udid, reason: String(describing: error), outcome: "preserved", name: clone.name))
+                progress("Preserved old Simulator \(clone.udid): \(error)")
+            }
+        }
+        if !actions.isEmpty { try store.write(actions, to: root.appendingPathComponent("last-migration.json")) }
+    }
+
+    /// A saved or explicitly named managed destination is resolved again so a
+    /// replaced or collected clone never launches by its stale UDID.
+    public func prepareManagedDestination(_ destination: XcodeDestination, project: XcodeProject) async throws -> XcodeDestination {
+        guard destination.kind == .simulator,
+              let record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(destination.id)),
+              record.name == destination.name, !record.owners.isEmpty else { return destination }
+        let catalog = try JSONDecoder().decode(SimulatorCatalog.self, from: Data(try await simctl(["list", "-j"]).utf8))
+        let selection = try Self.managedSelection(id: destination.id, name: record.name, catalog: catalog,
+                                                  clones: loadRegistry().clones ?? [])
+        let prepared = try await prepare(name: record.name, selection: selection, project: project)
+        return XcodeDestination(id: prepared.udid, name: prepared.name, runtime: prepared.runtime, kind: .simulator)
+    }
+
+    static func managedSelection(id: String, name: String, catalog: SimulatorCatalog, clones: [Clone]) throws -> SimulatorSelection {
+        if let pair = catalog.devices.first(where: { $0.value.contains { $0.udid == id } }),
+           let device = pair.value.first(where: { $0.udid == id }) {
+            guard device.name == name, let type = device.deviceTypeIdentifier else {
+                throw OrchardError.message("Managed Simulator identity changed; select the intended destination again.")
+            }
+            return SimulatorSelection(deviceType: type, runtime: pair.key)
+        }
+        if let clone = clones.first(where: { $0.udid == id && $0.name == name }), let configuration = clone.configuration {
+            return SimulatorSelection(deviceType: configuration.deviceType, runtime: configuration.runtime)
+        }
+        throw OrchardError.message("The saved Simulator is missing and its device type is unknown. Select a device type and runtime again.")
+    }
+
+    /// Background collection keeps the latest base current after Xcode or runtime updates.
+    func maintain() async -> CleanupReport.Action? {
+        guard FileManager.default.fileExists(atPath: root.appendingPathComponent("manifest.json").path) else { return nil }
+        do {
+            let ready = try await prepare()
+            return .init(target: ready.baseUDID, reason: "runtime-ready: \(ready.runtime)", outcome: "ready", name: ready.name)
+        } catch {
+            return .init(target: root.path, reason: String(describing: error), outcome: "pending")
+        }
+    }
 
     private func loadRegistry() throws -> Registry {
         let path = root.appendingPathComponent("manifest.json")
@@ -265,7 +402,8 @@ enum SimulatorProcess {
     }
 
     static func execute(executable: String, arguments: [String], timeout: TimeInterval,
-                        background: Bool = false) async throws -> String {
+                        background: Bool = false, processQualityOfService: QualityOfService? = nil,
+                        terminationGrace: Duration = .seconds(2)) async throws -> String {
         let control = SimulatorProcessControl()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -284,18 +422,19 @@ enum SimulatorProcess {
                         let process = Process()
                         process.executableURL = URL(fileURLWithPath: executable)
                         process.arguments = arguments
-                        process.qualityOfService = background ? .background : .userInitiated
+                        process.qualityOfService = processQualityOfService ?? (background ? .background : .userInitiated)
                         process.standardOutput = out
                         process.standardError = err
+                        process.standardInput = FileHandle.nullDevice
                         try control.start(process)
-                        let timer = DispatchSource.makeTimerSource(queue: .global())
-                        timer.schedule(deadline: .now() + timeout)
-                        timer.setEventHandler { control.stop(timedOut: true) }
-                        timer.resume()
-                        defer { timer.cancel() }
-                        // Foundation's Process must run and wait on the same
-                        // thread; awaiting between these calls can strand its runloop.
-                        process.waitUntilExit()
+                        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+                        // Keep Foundation's launch runloop serviced, but never
+                        // enter waitUntilExit: a child can ignore SIGTERM.
+                        while process.isRunning {
+                            if ContinuousClock.now >= deadline { control.stop(timedOut: true) }
+                            if control.forceStopAfterGrace(terminationGrace) { try control.check() }
+                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+                        }
                         try control.check()
                         let stdout = try String(contentsOf: output, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
                         let stderr = try String(contentsOf: errorOutput, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -317,6 +456,7 @@ private final class SimulatorProcessControl: @unchecked Sendable {
     private var process: Process?
     private var cancelled = false
     private var timedOut = false
+    private var stoppedAt: ContinuousClock.Instant?
 
     func start(_ value: Process) throws {
         lock.lock()
@@ -329,9 +469,21 @@ private final class SimulatorProcessControl: @unchecked Sendable {
     func stop(timedOut: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        self.timedOut = self.timedOut || timedOut
+        guard !cancelled else { return }
+        self.timedOut = timedOut
         cancelled = true
+        stoppedAt = .now
         if let process, process.isRunning { process.terminate() }
+    }
+
+    func forceStopAfterGrace(_ grace: Duration) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stoppedAt, ContinuousClock.now >= stoppedAt.advanced(by: grace) else { return false }
+        // Only the Process instance we spawned is signalled. Do not enumerate
+        // processes or wait indefinitely for kernel/process teardown.
+        if let process, process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
+        return true
     }
 
     func check() throws {
