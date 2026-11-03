@@ -45,6 +45,11 @@ struct SimulatorCatalog: Decodable, Sendable {
     let devices: [String: [Device]]
 
     func resolve(_ selection: SimulatorSelection) throws -> (DeviceType, Runtime) {
+        if selection.deviceType != "latest", !devicetypes.contains(where: {
+            $0.name == selection.deviceType || $0.identifier == selection.deviceType
+        }) {
+            throw OrchardError.message("Unknown Simulator device type: \(selection.deviceType).")
+        }
         let runtimes = runtimes.filter {
             $0.isAvailable && $0.identifier.contains(".iOS-") &&
             (selection.runtime == "latest" || selection.runtime == $0.name || selection.runtime == $0.identifier)
@@ -59,14 +64,7 @@ struct SimulatorCatalog: Decodable, Sendable {
             ? runtimes.filter { !$0.isModelSpecific } + runtimes.filter(\.isModelSpecific)
             : runtimes
         for runtime in ordered {
-            let version = Self.numbers(runtime.version)
-            let encodedVersion = UInt64((version.first ?? 0) << 16 | (version.dropFirst().first ?? 0) << 8 | (version.dropFirst(2).first ?? 0))
-            let compatible = devicetypes.filter { device in
-                if let supported = runtime.supportedDeviceTypes {
-                    return supported.contains { $0.identifier == device.identifier }
-                }
-                return (device.minRuntimeVersion ?? 0) <= encodedVersion && encodedVersion <= (device.maxRuntimeVersion ?? UInt64.max)
-            }
+            let compatible = devicetypes.filter { Self.supports($0, runtime: runtime) }
             if selection.deviceType != "latest" {
                 if let device = compatible.first(where: { $0.name == selection.deviceType || $0.identifier == selection.deviceType }) {
                     return (device, runtime)
@@ -88,7 +86,29 @@ struct SimulatorCatalog: Decodable, Sendable {
                 }).first { return (device, runtime) }
             }
         }
+        if runtimes.isEmpty, selection.runtime != "latest" {
+            throw OrchardError.message("iOS Simulator runtime \(selection.runtime) is not installed and available. Existing devices have been preserved.")
+        }
+        if selection.deviceType != "latest",
+           let device = devicetypes.first(where: { $0.name == selection.deviceType || $0.identifier == selection.deviceType }) {
+            let alternatives = self.runtimes.filter { $0.isAvailable && $0.identifier.contains(".iOS-") && Self.supports(device, runtime: $0) }
+                .map(\.name).joined(separator: ", ")
+            throw OrchardError.message("No installed, available iOS runtime confirms support for \(device.name) / \(selection.runtime). Compatible installed runtimes: \(alternatives.isEmpty ? "none" : alternatives). Existing devices have been preserved.")
+        }
         throw OrchardError.message("No installed, available iOS Simulator configuration matches \(selection.deviceType) / \(selection.runtime).")
+    }
+
+    // simctl's runtime-specific support list takes precedence over the device's
+    // broad min/max range: a special runtime may support only one phone family.
+    static func supports(_ device: DeviceType, runtime: Runtime) -> Bool {
+        if let supported = runtime.supportedDeviceTypes {
+            return supported.contains { $0.identifier == device.identifier }
+        }
+        guard let minimum = device.minRuntimeVersion, let maximum = device.maxRuntimeVersion else { return false }
+        let version = numbers(runtime.version)
+        guard !version.isEmpty else { return false }
+        let encoded = UInt64((version[0] << 16) | ((version.dropFirst().first ?? 0) << 8) | (version.dropFirst(2).first ?? 0))
+        return minimum <= encoded && encoded <= maximum
     }
 
     static func numbers(_ value: String) -> [Int] {

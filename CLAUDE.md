@@ -65,7 +65,8 @@ Fallback scanning also checks `.worktrees` and `.claude/worktrees`.
   - `RunsCommand.swift` / `StopCommand.swift`: follow and stop runs through the run store.
   - `ListCommand.swift`: `list branches|schemes|destinations`.
   - `SimulatorCommand.swift`: `simulator base|ensure`.
-  - `CleanupCommand.swift`: `cleanup` and the hidden `cleanup-worker`.
+  - `DeviceUseCommand.swift`: `device-use`, wrapping an external command in a device activity lease.
+  - `CleanupCommand.swift`: `cleanup` and the hidden `cleanup-worker` (`--devices-only` drains `CleanupInvocation`).
   - `CLIEnvironment.swift`: fetching, delegation, build-log wiring, signal/timeout handling, NDJSON events, run records.
 - `Sources/OrchardCore/WorktreeContext.swift`
   - Worktree and configured-directory discovery.
@@ -109,16 +110,23 @@ Install by rename so running delegated runs keep their old binary.
 
 ## Simulator base ownership
 
-- `SimulatorBaseService` exclusively owns the private `SimulatorBases-v1/devices` device set and its manifest. Default-set branch Simulators are never cleaned up here.
-- `simulator base`, `simulator ensure`, and `run --branch-simulator` share the same process lock and service. `Scripts/ios-run.sh` delegates creation to that service.
+- `SimulatorBaseService` exclusively owns the private `SimulatorBases-v1/devices` device set and its manifest, including the `clones` registry of default-set branch Simulators it cloned or adopted from exact UDID/name ownership records.
+- `simulator base`, `simulator ensure`, and `run --branch-simulator` share the same process lock and service. `Scripts/ios-run.sh` delegates creation to that service. `run --destination` re-resolves an owned destination through `prepareManagedDestination`.
 - A base has system apps only and is initialized by boot/bootstatus/shutdown. Do not install user apps, apply SimSlim, or run it as a build destination.
-- Replacement must finish initialization and any requested clone before pruning an older registered base. Recheck identity, Shutdown state and installed apps before deletion. Unknown, busy or modified devices are preserved.
-- Latest means installed compatible iOS plus newest iPhone hardware generation, preferring regular Pro within that generation; explicit configuration wins. No Xcode/runtime downloads.
+- Bases coexist per device type and runtime. Replacement must finish initialization and any requested clone before pruning an older registered base of the same target. Recheck identity and installed apps; a booted obsolete base is shut down first. Unknown or modified devices are preserved.
+- A clone is obsolete only when its recorded runtime build differs for the same device type and runtime. Xcode build or simctl path changes keep it. A booted obsolete clone is reused until it is shut down; only shut-down ones are deleted, after the device lease is free. Legacy clones without a recorded configuration are never obsolete.
+- Latest means installed compatible iOS plus newest iPhone hardware generation, preferring regular Pro within that generation; explicit configuration wins. Runtime support comes from simctl's per-runtime list first, then the device's min/max range; missing metadata is unsupported. No Xcode/runtime downloads.
 
 ## Background artifact collection
 
 - `ArtifactActivity` records worktree ownership and holds shared process leases through build/install. Release before console attachment; console lifetime must not pin an orphan Simulator.
 - `ArtifactCleanup` deletes only attributable DerivedData and named branch Simulators when the owner directory is absent or the latest activity is old enough. Never infer simulator ownership from a branch-shaped name. Standard devices/private bases, exclusions and modified package checkouts remain protected.
+- Age and merge reasons apply to Shutdown Simulators only. A Booted Simulator is shut down by its UDID and collected only when every owner worktree is missing; external use is judged after that shutdown (a booted device's own system processes always hold its data open).
+- When every existing owner worktree is a worktree root with another branch checked out (`branchSwitched`), a Booted Simulator is only shut down, and open files under those reused folders are excluded from the usage check of the shut-down rules. Detached HEADs and Git errors are never a switch.
 - Before deleting a Shutdown Simulator, processes still running from its data directory are orphans (no `launchd_sim`); they are terminated, and the device is preserved if any survive.
-- `cleanup-worker` is a hidden CLI entry point spawned independently at background CPU/I/O priority. Its exclusive worker lock prevents overlaps; per-project/device exclusive try-locks skip active operations. DerivedData is moved aside under the lock before slow deletion.
+- `DeviceWindowCloser` closes a removed device's standalone compact Device Hub window through Accessibility. Window closing is best effort: a failure (no permission, tabs, ambiguity) is reported as `window-left-open` and never blocks shutdown or deletion, because otherwise nothing could be collected without the permission.
+- `DeviceActivity` receipts (`device-use/`) count as Simulator use; an unreadable receipt counts as current use.
+- `AVDCleanup` deletes only AVDs whose directory contains an `orchard-owner.json` marker written by the tool that created them, when the marked worktree is missing (stop and delete), or when the marker's `branch` is no longer checked out there (stop; delete once the marker's `lastUsedAt` is over a day old). Orchard never creates, launches or adopts AVDs, and never infers AVD ownership from names, launch parameters or launch directories. Markers without `branch`/`lastUsedAt` only get the missing-worktree rule.
+- `cleanup-worker` is a hidden CLI entry point spawned independently at background CPU priority. Do not set a process-wide I/O throttle: it is inherited by utility-QoS simctl/ADB/avdmanager children and makes their bounded IPC time out. Its exclusive worker lock prevents overlaps; per-project/device exclusive try-locks skip active operations. DerivedData is moved aside under the lock before slow deletion.
+- `run`, `list`, `runs` and `simulator` call `BackgroundCleanup.request()` from `OrchardCLI.main()`: a durable `CleanupInvocation` request plus a `cleanup-worker --devices-only` pass over recorded Simulators and marked AVDs without repository discovery. Help and `cleanup` never schedule an apply pass. Activity begin/finish still schedules the full collection.
 - Test cleanup with injected paths and simulated commands.
