@@ -91,11 +91,21 @@ OrchardはAndroidエミュレーターの作成や起動を行わず、持ち主
 ## 動作環境
 
 - macOS 14 以降
-- Xcode(`xcodebuild`・`simctl`・`devicectl` が使えること)
+- Xcode 16 以降(`xcodebuild`・`simctl`・`devicectl` が使えること)
 
 ## インストール
 
-ソースからビルドし、`orchard` を `~/.local/bin` にインストールします（`PATH` 上の別の場所に入れる場合は `ORCHARD_INSTALL_DIR` を指定します）:
+Homebrew でインストールします。Formula はタグ付きリリースのソースから `orchard` をビルドするため、先に Xcode を入れておいてください:
+
+```bash
+brew install kyoya1123/tap/orchard
+```
+
+更新は `brew upgrade kyoya1123/tap/orchard` です。`orchard` だけを指定すると、名前が同じ別の Homebrew cask を指すことがあるため、tap 名を含めて指定してください。
+
+### ソースから入れる（開発用）
+
+`Scripts/install.sh` は手元の作業ツリーをビルドし、`orchard` を `~/.local/bin` にインストールします（`PATH` 上の別の場所に入れる場合は `ORCHARD_INSTALL_DIR` を指定します）。Homebrew 版と両方ある場合は、`PATH` で先に来るほうが使われます。
 
 ```bash
 git clone https://github.com/kyoya1123/Orchard.git
@@ -156,3 +166,7 @@ Scripts/install.sh   # リリースビルドしてインストール
 
 - `OrchardCore` — 探索(git worktree・Xcode プロジェクト)、`xcodebuild` / `simctl` / `devicectl` のオーケストレーション、選択解決、Run ストア。
 - `OrchardCLI` — `orchard` コマンド。
+
+## ライセンス
+
+MIT ライセンスです。詳しくは [LICENSE](LICENSE) を参照してください。

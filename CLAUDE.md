@@ -102,6 +102,14 @@ Scripts/install.sh
 
 Install by rename so running delegated runs keep their old binary.
 
+## Release
+
+Users install from the `kyoya1123/homebrew-tap` formula (`Formula/orchard.rb`), which builds the tag's source tarball with `swift build --disable-sandbox` (SwiftPM's own sandbox fails inside Homebrew's). Prebuilt binaries are deliberately not shipped, since they would need signing and notarization.
+
+Versions follow SemVer, still `0.x` (breaking CLI or JSON output changes bump the minor). `orchardVersion` in `Sources/OrchardCLI/Version.swift` is what `orchard --version` prints and the formula test checks; bump it on main in its own commit before releasing.
+
+`Scripts/release.sh <version>` releases a clean `origin/main` whose `orchardVersion` matches: runs `swift test`, pushes tag `v<version>`, creates the GitHub Release, then rewrites the formula's `url`/`sha256` in the tap and pushes it. The sha256 must come from GitHub's tag tarball; a local `git archive` hashes differently. The formula test only runs `orchard --help`, because `list`/`runs`/`simulator`/`run` schedule a detached cleanup worker.
+
 ## Notes For Future Agents
 
 - Keep Orchard generic. Do not add repository-specific assumptions.

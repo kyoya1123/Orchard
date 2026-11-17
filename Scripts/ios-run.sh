@@ -26,7 +26,7 @@ if [ -z "$ORCHARD" ]; then
   done
 fi
 if [ -z "$ORCHARD" ]; then
-  echo 'orchard が見つかりません。OrchardのScripts/install.shでインストールしてください。' >&2
+  echo 'orchard が見つかりません。brew install kyoya1123/tap/orchard でインストールしてください。' >&2
   exit 6
 fi
 

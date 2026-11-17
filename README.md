@@ -106,11 +106,21 @@ When that worktree no longer exists, a running emulator for the AVD is stopped w
 ## Requirements
 
 - macOS 14 or later
-- Xcode (with `xcodebuild`, `simctl`, `devicectl` available)
+- Xcode 16 or later (with `xcodebuild`, `simctl`, `devicectl` available)
 
 ## Installation
 
-Build from source and install `orchard` into `~/.local/bin` (set `ORCHARD_INSTALL_DIR` to choose another directory on your `PATH`):
+Install with Homebrew. The formula builds `orchard` from the tagged source release, so Xcode must be installed first:
+
+```bash
+brew install kyoya1123/tap/orchard
+```
+
+Upgrade with `brew upgrade kyoya1123/tap/orchard`. Use the fully qualified name: `orchard` alone can resolve to an unrelated Homebrew cask.
+
+### From source (development)
+
+`Scripts/install.sh` builds the working tree and installs `orchard` into `~/.local/bin` (set `ORCHARD_INSTALL_DIR` to choose another directory on your `PATH`). If both are installed, whichever directory comes first on `PATH` wins.
 
 ```bash
 git clone https://github.com/kyoya1123/Orchard.git
@@ -171,3 +181,7 @@ The package has two targets:
 
 - `OrchardCore` — discovery (git worktrees, Xcode projects), `xcodebuild` / `simctl` / `devicectl` orchestration, selection resolving, and the run store.
 - `OrchardCLI` — the `orchard` command.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
