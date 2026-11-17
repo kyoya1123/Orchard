@@ -9,6 +9,7 @@ struct OrchardCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "orchard",
         abstract: "Build and run iOS apps from a worktree/scheme/destination.",
+        version: orchardVersion,
         subcommands: [RunCommand.self, ListCommand.self, RunsCommand.self, StopCommand.self, SimulatorCommand.self,
                       DeviceUseCommand.self, CleanupCommand.self, CleanupWorker.self]
     )
