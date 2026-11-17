@@ -166,3 +166,7 @@ Scripts/install.sh   # リリースビルドしてインストール
 
 - `OrchardCore` — 探索(git worktree・Xcode プロジェクト)、`xcodebuild` / `simctl` / `devicectl` のオーケストレーション、選択解決、Run ストア。
 - `OrchardCLI` — `orchard` コマンド。
+
+## ライセンス
+
+MIT ライセンスです。詳しくは [LICENSE](LICENSE) を参照してください。

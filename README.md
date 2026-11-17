@@ -181,3 +181,7 @@ The package has two targets:
 
 - `OrchardCore` — discovery (git worktrees, Xcode projects), `xcodebuild` / `simctl` / `devicectl` orchestration, selection resolving, and the run store.
 - `OrchardCLI` — the `orchard` command.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
