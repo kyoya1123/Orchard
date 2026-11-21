@@ -154,7 +154,7 @@ orchard cleanup [--apply] [--scope <scope>] [--no-discover]
 
 Branch, scheme, and destination are fuzzy matched (exact → case-insensitive → prefix → substring); a destination UDID matches exactly. Ambiguous input lists the candidates so you can narrow it down.
 
-By default `run` executes attached: it builds and launches in-process, streams the app's console to stdout, and blocks until the app exits. Pass `--delegate` to run it in a detached background process instead: the command returns as soon as the run has started and prints its id (`Delegated to Orchard: … · run <id>`). The run keeps going after the calling shell exits; follow it with `orchard runs <id>` and end it with `orchard stop <id>`. A run whose status is `running` with an empty `activityText` has launched the app and is attached to its console.
+By default `run` executes attached: it builds and launches in-process, streams the app's console to stdout, and blocks until the app exits. Pass `--delegate` to run it in a detached background process instead: the command returns as soon as the run has started and prints its id (`Delegated to Orchard: … · run <id>`). The run keeps going after the calling shell exits; follow it with `orchard runs <id>` and end it with `orchard stop <id>`. A run whose status is `running` with an empty `activityText` has launched the app and is attached to its console; its `launchedAt` is then set. Once a run ends, its record also holds `exitCode` and, on failure, `errorMessage`.
 
 Output is designed for agents and scripts:
 

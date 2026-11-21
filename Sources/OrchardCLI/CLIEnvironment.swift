@@ -34,8 +34,6 @@ final class CLIEnvironment: @unchecked Sendable {
     // as the main run task.
     private let stateLock = NSLock()
     private var stopReason: StopReason?
-    // Set once the first console chunk arrives, so `emitConsole` can announce
-    // "Launched" exactly once for callers polling progress instead of stdout.
     private var launchedEmitted = false
     private var signalSources: [DispatchSourceSignal] = []
 
@@ -142,7 +140,14 @@ final class CLIEnvironment: @unchecked Sendable {
         let pid = try Self.spawnDetached(arguments.filter { $0 != "--delegate" } + ["--quiet", "--run-id", id])
         let deadline = Date().addingTimeInterval(120)
         while RunStore.shared.loadAll().contains(where: { $0.id == id }) == false {
-            guard Date() < deadline, kill(pid, 0) == 0 else {
+            var status: Int32 = 0
+            if waitpid(pid, &status, WNOHANG) == pid {
+                let detail = (status & 0x7f) == 0
+                    ? "status \((status >> 8) & 0xff)"
+                    : "signal \(status & 0x7f)"
+                throw BuildFailure(message: "The delegated run (pid \(pid)) exited with \(detail) before recording the run.")
+            }
+            guard Date() < deadline else {
                 throw BuildFailure(message: "The delegated run (pid \(pid)) did not start.")
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -216,7 +221,8 @@ final class CLIEnvironment: @unchecked Sendable {
                 destination: resolvedDestination,
                 progress: { self.emitProgress($0) },
                 consoleLog: { self.emitConsole($0) },
-                commandLog: { self.emitCommand($0) }
+                commandLog: { self.emitCommand($0) },
+                launched: { self.markLaunched() }
             )
         }
 
@@ -295,8 +301,8 @@ final class CLIEnvironment: @unchecked Sendable {
         return stopReason
     }
 
-    /// Returns true only on the first call, so callers can fire a one-time
-    /// "Launched" signal from `emitConsole`, which runs on arbitrary threads.
+    /// Returns true only on the first call: launch detection can fire from
+    /// several threads and more than once per launch.
     private func markLaunchedOnce() -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -326,17 +332,24 @@ final class CLIEnvironment: @unchecked Sendable {
         }
     }
 
-    func emitConsole(_ chunk: String) {
-        if markLaunchedOnce() {
-            // Pollers of `orchard runs` treat `running` with an empty activity as
-            // "launched and attached", so clear it rather than writing "Launched".
-            updateRecord(persistNow: true) { $0.activityText = "" }
-            if json {
-                emitEvent(CLIEvent(type: "progress", stage: "Launched"))
-            } else {
-                writeLine("Launched", to: .standardError)
-            }
+    /// Pollers of `orchard runs` treat `running` with an empty activity as
+    /// "launched and attached", so the activity is cleared rather than set to "Launched".
+    func markLaunched() {
+        // A stopped launch command flushes its buffered output on exit, which is not a launch.
+        guard currentStopReason() == nil, markLaunchedOnce() else { return }
+        let now = Date().timeIntervalSince1970
+        updateRecord(persistNow: true) {
+            $0.activityText = ""
+            $0.launchedAt = now
         }
+        if json {
+            emitEvent(CLIEvent(type: "progress", stage: "Launched"))
+        } else {
+            writeLine("Launched", to: .standardError)
+        }
+    }
+
+    func emitConsole(_ chunk: String) {
         // Console output can be voluminous; persist throttled.
         updateRecord(persistNow: false) { $0.log = Self.boundedAppend($0.log, chunk) }
         guard !quiet else { return }
@@ -353,6 +366,7 @@ final class CLIEnvironment: @unchecked Sendable {
                 $0.status = mapped
             }
             $0.activityText = status.capitalized
+            $0.exitCode = exitCode
         }
         if json {
             emitEvent(CLIEvent(type: "result", status: status, exitCode: exitCode))
@@ -452,7 +466,10 @@ final class CLIEnvironment: @unchecked Sendable {
 
     func emitError(_ message: String) {
         // A delegated run's stderr goes to /dev/null; the record is the only place the failure survives.
-        updateRecord(persistNow: true) { $0.log = Self.boundedAppend($0.log, message + "\n") }
+        updateRecord(persistNow: true) {
+            $0.log = Self.boundedAppend($0.log, message + "\n")
+            $0.errorMessage = message
+        }
         if json {
             emitEvent(CLIEvent(type: "error", text: message))
         } else {

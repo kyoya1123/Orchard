@@ -54,6 +54,11 @@ public struct RunRecord: Codable, Identifiable, Sendable {
     /// PID of the process that owns this run, which `orchard stop` and a
     /// superseding run signal. Optional for backward compatibility with older records.
     public var pid: Int32?
+    /// Epoch seconds at which the app was confirmed launched.
+    public var launchedAt: Double?
+    /// The CLI exit code of the run, set when it reaches a terminal status.
+    public var exitCode: Int?
+    public var errorMessage: String?
 
     public init(
         id: String,
@@ -68,7 +73,10 @@ public struct RunRecord: Codable, Identifiable, Sendable {
         status: Status,
         activityText: String,
         log: String,
-        pid: Int32? = nil
+        pid: Int32? = nil,
+        launchedAt: Double? = nil,
+        exitCode: Int? = nil,
+        errorMessage: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -85,6 +93,13 @@ public struct RunRecord: Codable, Identifiable, Sendable {
         self.activityText = activityText
         self.log = log
         self.pid = pid
+        self.launchedAt = launchedAt
+        self.exitCode = exitCode
+        self.errorMessage = errorMessage
+    }
+
+    public var isLaunched: Bool {
+        launchedAt != nil
     }
 
     public var isFinished: Bool {
