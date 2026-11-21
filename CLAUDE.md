@@ -41,8 +41,12 @@ See `README.md` for the user-facing reference. Internal details:
 - One run per destination: starting a run on a destination stops and removes any existing run there.
 - `runs` marks `running` records whose owner process is gone as `stopped`, prunes finished records after 24h, and drops records whose project file no longer exists.
 - Record state:
-  - Build progress is represented by non-empty `activityText`.
-  - `running` with an empty `activityText` means the app launched and the console is attached. Callers poll for exactly this, so keep it stable.
+  - Build progress is represented by non-empty `activityText`; it is `Launching` while the launch command runs.
+  - `running` with an empty `activityText` means the app launch was confirmed and the console is attached; `launchedAt` is set at the same moment. Callers poll for exactly this, so keep it stable.
+  - Launch is confirmed by `BuildRunService`'s `launched` callback: on a Simulator, the first stdout from `simctl launch` (its `<bundle id>: <pid>` line; stderr does not count); on a device, the first bridged stdout from `devicectl` or a main-executable app PID absent from the baseline taken before launch (`devicectl` prints nothing for apps that do not write to stdout). Without a baseline there is no PID polling.
+  - Streamed commands run with `NSUnbufferedIO=YES`. Without it simctl block-buffers its stdout into the pipe and the pid line only arrives when the launch command exits.
+  - Output flushed by a launch command that is being stopped is not a launch; `launchedAt` stays unset after a stop is requested.
+  - A terminal record has `status` (`completed`/`failed`/`stopped`) and `exitCode`; a failure also has `errorMessage`.
 - Directory precedence: `--dir` → `ORCHARD_DIRS` → current project/repository → auto-registered repositories plus `configuredDirectoryPaths` from the `dev.codex.Orchard` defaults domain.
 - `RepositoryRegistry` uses canonical Git common-directory identity, relative project locations, atomic per-repository records and process locks. Registration happens before scheme/build/Simulator work and has no opt-out. `list branches`/destinations/runs remain read-only. Discovery metadata must not replace artifact ownership history. Identical registration does not rewrite files.
 

@@ -46,7 +46,8 @@ public final class BuildRunService: @unchecked Sendable {
         destination: XcodeDestination,
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
-        commandLog: @Sendable @escaping (String) -> Void = { _ in }
+        commandLog: @Sendable @escaping (String) -> Void = { _ in },
+        launched: @Sendable @escaping () -> Void = {}
     ) async throws {
         shouldStop = false
         isStopping = false
@@ -99,7 +100,8 @@ public final class BuildRunService: @unchecked Sendable {
                 progress: progress,
                 consoleLog: consoleLog,
                 commandLog: commandLog,
-                activity: activity
+                activity: activity,
+                launched: launched
             )
         case .simulator:
             try await installAndLaunchOnSimulator(
@@ -109,7 +111,8 @@ public final class BuildRunService: @unchecked Sendable {
                 consoleLog: consoleLog,
                 commandLog: commandLog,
                 slimTask: slimTask,
-                activity: activity
+                activity: activity,
+                launched: launched
             )
         }
     }
@@ -158,7 +161,8 @@ public final class BuildRunService: @unchecked Sendable {
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void,
         slimTask: Task<Void, Never>?,
-        activity: ArtifactActivity?
+        activity: ArtifactActivity?,
+        launched: @Sendable @escaping () -> Void
     ) async throws {
         if let slimTask {
             progress("Slimming simulator")
@@ -189,7 +193,7 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         activity?.finish()
-        progress("")
+        progress("Launching")
         try await runStreaming(
             executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
             // A PTY (line-buffered) instead of a plain pipe captures the app's
@@ -198,7 +202,10 @@ public final class BuildRunService: @unchecked Sendable {
             arguments: ["simctl", "launch", "--terminate-running-process", "--console-pty",
                         destination.id, app.bundleIdentifier],
             currentDirectoryURL: nil,
-            log: consoleLog
+            log: consoleLog,
+            // simctl prints "<bundle id>: <pid>" to stdout on success only;
+            // failures write to stderr.
+            onStandardOutput: launched
         )
         try throwIfStopped()
     }
@@ -209,7 +216,8 @@ public final class BuildRunService: @unchecked Sendable {
         progress: @Sendable @escaping (String) -> Void,
         consoleLog: @Sendable @escaping (String) -> Void,
         commandLog: @Sendable @escaping (String) -> Void,
-        activity: ArtifactActivity?
+        activity: ArtifactActivity?,
+        launched: @Sendable @escaping () -> Void
     ) async throws {
         commandLog("$ xcrun devicectl device install app --device \(destination.id) \(app.appURL.path)\n")
         try await runStreamingWaitingForDeviceUnlock(
@@ -231,15 +239,54 @@ public final class BuildRunService: @unchecked Sendable {
         try throwIfStopped()
 
         activity?.finish()
+        progress("Launching")
+
+        // `devicectl process launch --console` prints nothing unless the app
+        // writes to stdout, so a new app process is the only launch signal for
+        // quiet apps. PIDs from before the launch are excluded because
+        // `--terminate-existing` has not yet killed them.
+        let appURL = try? await installedDeviceAppURL(
+            bundleIdentifier: app.bundleIdentifier,
+            destination: destination
+        )
+        var pollingTask: Task<Void, Never>?
+        if let appURL {
+            if let baselineIDs = try? await runningDeviceProcessIDs(
+                appURL: appURL,
+                destination: destination,
+                mainExecutableOnly: true
+            ) {
+                let baseline = Set(baselineIDs)
+                pollingTask = Task { [self] in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        guard !Task.isCancelled else { return }
+                        let current = try? await runningDeviceProcessIDs(
+                            appURL: appURL,
+                            destination: destination,
+                            mainExecutableOnly: true
+                        )
+                        guard !Task.isCancelled else { return }
+                        if let current, DeviceLaunchDetector.hasNewLaunch(baseline: baseline, current: current) {
+                            launched()
+                            return
+                        }
+                    }
+                }
+            }
+        }
+        defer { pollingTask?.cancel() }
+
         try await runStreamingWaitingForDeviceUnlock(
             arguments: [
                 "devicectl", "device", "--quiet", "process", "launch",
                 "--device", destination.id, "--terminate-existing", "--console", app.bundleIdentifier
             ],
-            phase: "",
+            phase: "Launching",
             log: consoleLog,
             progress: progress,
-            commandLog: commandLog
+            commandLog: commandLog,
+            onStandardOutput: launched
         )
         try throwIfStopped()
     }
@@ -252,7 +299,8 @@ public final class BuildRunService: @unchecked Sendable {
         phase: String,
         log: @Sendable @escaping (String) -> Void,
         progress: @Sendable @escaping (String) -> Void,
-        commandLog: @Sendable @escaping (String) -> Void
+        commandLog: @Sendable @escaping (String) -> Void,
+        onStandardOutput: (@Sendable () -> Void)? = nil
     ) async throws {
         var announcedWait = false
 
@@ -265,7 +313,8 @@ public final class BuildRunService: @unchecked Sendable {
                     executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
                     arguments: arguments,
                     currentDirectoryURL: nil,
-                    log: log
+                    log: log,
+                    onStandardOutput: onStandardOutput
                 )
                 return
             } catch let failure as CommandFailure {
@@ -365,7 +414,8 @@ public final class BuildRunService: @unchecked Sendable {
 
     private func runningDeviceProcessIDs(
         appURL: URL,
-        destination: XcodeDestination
+        destination: XcodeDestination,
+        mainExecutableOnly: Bool = false
     ) async throws -> [Int] {
         let outputURL = FileManager.default
             .temporaryDirectory
@@ -392,6 +442,13 @@ public final class BuildRunService: @unchecked Sendable {
         let response = try JSONDecoder().decode(DeviceProcessesResponse.self, from: data)
         let appPath = appURL.path.hasSuffix("/") ? appURL.path : "\(appURL.path)/"
 
+        if mainExecutableOnly {
+            return DeviceLaunchDetector.mainProcessIDs(
+                appPath: appPath,
+                processes: response.result.runningProcesses.map { ($0.executable, $0.processIdentifier) }
+            )
+        }
+
         return response.result.runningProcesses.compactMap { process in
             guard let executableURL = URL(string: process.executable),
                   executableURL.path.hasPrefix(appPath) else {
@@ -405,14 +462,16 @@ public final class BuildRunService: @unchecked Sendable {
         executableURL: URL,
         arguments: [String],
         currentDirectoryURL: URL?,
-        log: @Sendable @escaping (String) -> Void
+        log: @Sendable @escaping (String) -> Void,
+        onStandardOutput: (@Sendable () -> Void)? = nil
     ) async throws {
         do {
             try await runStreamingCapturingFailure(
                 executableURL: executableURL,
                 arguments: arguments,
                 currentDirectoryURL: currentDirectoryURL,
-                log: log
+                log: log,
+                onStandardOutput: onStandardOutput
             )
         } catch let failure as CommandFailure {
             throw failure.orchardError
@@ -423,7 +482,8 @@ public final class BuildRunService: @unchecked Sendable {
         executableURL: URL,
         arguments: [String],
         currentDirectoryURL: URL?,
-        log: @Sendable @escaping (String) -> Void
+        log: @Sendable @escaping (String) -> Void,
+        onStandardOutput: (@Sendable () -> Void)? = nil
     ) async throws {
         let outputTail = OutputTail()
 
@@ -432,6 +492,10 @@ public final class BuildRunService: @unchecked Sendable {
             process.executableURL = executableURL
             process.arguments = arguments
             process.currentDirectoryURL = currentDirectoryURL
+            // Into a pipe, simctl block-buffers its own stdout, so its
+            // "<bundle id>: <pid>" launch line would only arrive at exit.
+            // The launched app does not inherit this (only SIMCTL_CHILD_/DEVICECTL_CHILD_ vars pass through).
+            process.environment = ProcessInfo.processInfo.environment.merging(["NSUnbufferedIO": "YES"]) { _, new in new }
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -443,6 +507,7 @@ public final class BuildRunService: @unchecked Sendable {
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
                 let normalized = text.strippingCarriageReturns()
                 outputTail.append(normalized)
+                onStandardOutput?()
                 log(normalized)
             }
             errorPipe.fileHandleForReading.readabilityHandler = { handle in

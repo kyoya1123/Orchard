@@ -54,15 +54,18 @@ struct RunsCommand: AsyncParsableCommand {
     }
 
     private func printDetail(_ record: RunRecord) {
-        let lines = [
+        var lines = [
             "id:          \(record.id)",
             "source:      \(record.source)",
             "status:      \(record.status.rawValue)",
             "branch:      \(record.branchName)",
             "scheme:      \(record.scheme)",
             "destination: \(record.destination.name) (\(record.destination.kind), \(record.destination.runtime))",
-            "activity:    \(record.activityText)"
+            "activity:    \(record.activityText)",
+            "launched:    \(record.launchedAt.map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) } ?? "-")"
         ]
+        if let exitCode = record.exitCode { lines.append("exit code:   \(exitCode)") }
+        if let errorMessage = record.errorMessage { lines.append("error:       \(errorMessage)") }
         FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n--- log ---\n").utf8))
         print(record.log, terminator: "")
     }
@@ -78,6 +81,9 @@ struct RunsCommand: AsyncParsableCommand {
         let kind: String
         let startedAt: Double
         let updatedAt: Double
+        let activityText: String
+        let launchedAt: Double?
+        let exitCode: Int?
 
         init(_ record: RunRecord) {
             id = record.id
@@ -89,6 +95,9 @@ struct RunsCommand: AsyncParsableCommand {
             kind = record.destination.kind
             startedAt = record.startedAt
             updatedAt = record.updatedAt
+            activityText = record.activityText
+            launchedAt = record.launchedAt
+            exitCode = record.exitCode
         }
     }
 }
