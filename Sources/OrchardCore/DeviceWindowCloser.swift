@@ -47,6 +47,46 @@ enum DeviceWindowCloser {
             outcome: trusted ? "available" : "permission-required")
     }
 
+    /// Device Hub ignores a minimized window when handling `devices://device/open`
+    /// and opens a second one, which the closer then refuses as ambiguous.
+    /// Best effort: without Accessibility permission the open URL still shows the device.
+    @MainActor static func restoreMinimized(udid: String) async {
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
+        guard apps.count == 1, AXIsProcessTrusted() else { return }
+        struct Device: Decodable { let udid: String; let name: String }
+        struct DeviceList: Decodable { let devices: [String: [Device]] }
+        // Destinations carry runtime labels that differ by source, so the
+        // window title is built from simctl's runtime identifier instead.
+        guard let output = try? await ProcessRunner.run(executableURL: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                                                        arguments: ["simctl", "list", "devices", "-j"], currentDirectoryURL: nil),
+              let list = try? JSONDecoder().decode(DeviceList.self, from: Data(output.utf8)),
+              let (runtime, device) = list.devices.lazy.compactMap({ runtime, devices in
+                  devices.first { $0.udid == udid }.map { (runtime, $0) }
+              }).first,
+              let title = try? title(name: device.name, runtime: runtime) else { return }
+        let app = AXUIElementCreateApplication(apps[0].processIdentifier)
+        AXUIElementSetMessagingTimeout(app, 0.2)
+        func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+            AXUIElementSetMessagingTimeout(element, 0.2)
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
+        }
+        guard let windows = read(app, kAXWindowsAttribute) as? [AXUIElement] else { return }
+        let minimized = windows.filter {
+            (read($0, kAXIdentifierAttribute) as? String)?.hasPrefix("deviceWindow-AppWindow-") == true
+                && read($0, kAXTitleAttribute) as? String == title
+                && read($0, kAXMinimizedAttribute) as? Bool == true
+        }
+        for window in minimized {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline,
+              minimized.contains(where: { read($0, kAXMinimizedAttribute) as? Bool == true }) {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @MainActor static func close(name: String, runtime: String, uniqueDevice: Bool) async throws {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
         let legacy = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
