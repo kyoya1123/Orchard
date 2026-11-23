@@ -103,13 +103,12 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         let idle = try worktree(f, "idle")
         await f.fake.setHead(idle.path, "")
         try await f.fake.createAVD("detached", owner: idle.path, branch: "feature/x")
-        var busy: [String] = []
-        for operation in AVDCleanup.detachingOperations {
-            let owner = try worktree(f, "busy-\(operation)")
+        let busy = AVDCleanup.detachingOperations.map { "busy-\($0)" }
+        for (name, operation) in zip(busy, AVDCleanup.detachingOperations) {
+            let owner = try worktree(f, name)
             await f.fake.setHead(owner.path, "")
             try FileManager.default.createDirectory(at: owner.appendingPathComponent(".git/\(operation)"), withIntermediateDirectories: true)
-            try await f.fake.createAVD("busy-\(operation)", owner: owner.path, branch: "feature/y")
-            busy.append("busy-\(operation)")
+            try await f.fake.createAVD(name, owner: owner.path, branch: "feature/y")
         }
         let other = try worktree(f, "other")
         await f.fake.setHead(other.path, "refs/heads/main")
@@ -117,9 +116,10 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
 
         let report = await run(f, apply: true)
         XCTAssertNil(report.error)
-        XCTAssertTrue(report.actions.contains { $0.name == "detached" && $0.reason == "branch-switched" && $0.outcome == "removed" })
+        XCTAssertEqual(report.actions.map(\.name), ["detached"])
+        XCTAssertEqual(report.actions.first?.reason, "branch-switched")
+        XCTAssertEqual(report.actions.first?.outcome, "removed")
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.toolchain.ini("detached").path))
-        XCTAssertFalse(report.actions.contains { $0.name != "detached" })
         for name in busy + ["no-branch"] {
             XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini(name).path), name)
         }
@@ -185,11 +185,8 @@ actor AndroidFake {
         if tool == "/usr/bin/git", let flag = arguments.firstIndex(of: "-C") {
             let path = arguments[flag + 1]
             guard let head = heads[path] else { throw OrchardError.message("not a git repository") }
-            if arguments.contains("--show-toplevel") { return path }
-            if arguments.contains("--symbolic-full-name") { return head.isEmpty ? "HEAD" : head }
-            if arguments.contains("--git-path") {
-                return arguments.indices.filter { arguments[$0] == "--git-path" }
-                    .map { path + "/.git/" + arguments[$0 + 1] }.joined(separator: "\n")
+            if arguments.suffix(4) == ["--show-toplevel", "--absolute-git-dir", "--symbolic-full-name", "HEAD"] {
+                return [path, path + "/.git", head.isEmpty ? "HEAD" : head].joined(separator: "\n")
             }
         }
         if tool == toolchain.adb {
