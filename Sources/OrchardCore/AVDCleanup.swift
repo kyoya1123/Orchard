@@ -35,7 +35,7 @@ struct AndroidToolchain: Sendable {
 /// Written by the tool that uses the AVD for a worktree, inside `<name>.avd/`.
 /// Orchard never creates AVDs and never infers ownership from an AVD's name or
 /// from the directory it was launched from. `branch` and `lastUsedAt` (Unix
-/// seconds) are optional; without them only the missing-worktree rule applies.
+/// seconds) are optional; without `branch` only the missing-worktree rule applies.
 struct AVDOwnerMarker: Codable, Sendable {
     static let fileName = "orchard-owner.json"
     let worktreePath: String
@@ -43,27 +43,22 @@ struct AVDOwnerMarker: Codable, Sendable {
     var lastUsedAt: Double? = nil
 }
 
-/// Removes marked AVDs whose owner worktree no longer exists. When the owner
-/// folder was reused for another branch, the AVD is stopped, then removed once
-/// its marker has not been refreshed for a day.
+/// Stops and removes marked AVDs whose owner worktree no longer exists or was
+/// reused for another branch.
 struct AVDCleanup: Sendable {
     typealias Command = ArtifactCleanup.Command
-    static let switchedRetention: Double = 86400
     let toolchain: AndroidToolchain
     let command: Command
     let isMissing: @Sendable (String) throws -> Bool
-    let now: @Sendable () -> Date
     let shutdownTimeout: Duration
     let shutdownPollInterval: Duration
 
     init(toolchain: AndroidToolchain, command: @escaping Command,
          isMissing: @escaping @Sendable (String) throws -> Bool = MissingWorktree.check,
-         now: @escaping @Sendable () -> Date = { Date() },
          shutdownTimeout: Duration = .seconds(10), shutdownPollInterval: Duration = .milliseconds(250)) {
         self.toolchain = toolchain
         self.command = command
         self.isMissing = isMissing
-        self.now = now
         self.shutdownTimeout = shutdownTimeout
         self.shutdownPollInterval = shutdownPollInterval
     }
@@ -176,8 +171,6 @@ struct AVDCleanup: Sendable {
                 let switched = missing ? false : await branchSwitched(candidate.marker)
                 guard missing || switched else { continue }
                 let reason = missing ? "missing-worktree" : "branch-switched"
-                let expired = candidate.marker.lastUsedAt.map { now().timeIntervalSince1970 - $0 > Self.switchedRetention } ?? false
-                let removes = missing || expired
                 guard FileManager.default.isExecutableFile(atPath: toolchain.avdmanager),
                       FileManager.default.isExecutableFile(atPath: toolchain.adb) else {
                     throw OrchardError.message("Android tooling unavailable")
@@ -186,9 +179,8 @@ struct AVDCleanup: Sendable {
                 let serials = (running ?? [:]).filter { $0.value == name }.map(\.key)
                 guard serials.count <= 1 else { throw OrchardError.message("Multiple running instances of AVD") }
                 let state = serials.isEmpty ? "Shutdown" : "Booted"
-                guard removes || !serials.isEmpty else { continue }
                 if !apply {
-                    report.actions.append(action(reason, removes ? "would-remove" : "would-stop", state: state)); continue
+                    report.actions.append(action(reason, "would-remove", state: state)); continue
                 }
                 if let serial = serials.first {
                     outcome = "shutdown-unconfirmed"
@@ -197,9 +189,6 @@ struct AVDCleanup: Sendable {
                     outcome = "stopped-preserved"
                 }
                 running = nil
-                guard removes else {
-                    report.actions.append(action(reason, "stopped", state: state)); continue
-                }
                 let stillEligible = missing ? try isMissing(worktree) : await branchSwitched(candidate.marker)
                 guard stillEligible, try marked().contains(where: { $0.name == name && $0.marker.worktreePath == worktree
                         && $0.marker.lastUsedAt == candidate.marker.lastUsedAt }),

@@ -59,30 +59,28 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(commands.contains { $0.contains("ANDROID_AVD_HOME=\(f.toolchain.avdHome.path)") && $0.suffix(4).elementsEqual(["delete", "avd", "-n", "feature-x"]) })
     }
 
-    func testFolderReusedForAnotherBranchStopsThenRemovesAfterADay() async throws {
+    func testFolderReusedForAnotherBranchStopsAndRemovesImmediately() async throws {
         let f = try fixture()
         let owner = try worktree(f, "repo")
         await f.fake.setHead(owner.path, "refs/heads/other")
         let now = Date().timeIntervalSince1970
-        try await f.fake.createAVD("fresh", owner: owner.path, branch: "feature/fresh", lastUsedAt: now - 60)
-        await f.fake.boot("fresh", serial: "emulator-5554")
-        try await f.fake.createAVD("idle", owner: owner.path, branch: "feature/idle", lastUsedAt: now - AVDCleanup.switchedRetention - 60)
+        try await f.fake.createAVD("booted", owner: owner.path, branch: "feature/booted", lastUsedAt: now - 60)
+        await f.fake.boot("booted", serial: "emulator-5554")
         try await f.fake.createAVD("stopped", owner: owner.path, branch: "feature/stopped", lastUsedAt: now - 60)
-        try await f.fake.createAVD("current", owner: owner.path, branch: "other", lastUsedAt: now - AVDCleanup.switchedRetention - 60)
+        try await f.fake.createAVD("current", owner: owner.path, branch: "other", lastUsedAt: now - 60)
 
         let preview = await run(f, apply: false)
-        XCTAssertTrue(preview.actions.contains { $0.name == "fresh" && $0.outcome == "would-stop" })
-        XCTAssertTrue(preview.actions.contains { $0.name == "idle" && $0.outcome == "would-remove" })
+        XCTAssertTrue(preview.actions.contains { $0.name == "booted" && $0.outcome == "would-remove" })
+        XCTAssertTrue(preview.actions.contains { $0.name == "stopped" && $0.outcome == "would-remove" })
 
         let report = await run(f, apply: true)
         XCTAssertNil(report.error)
-        XCTAssertTrue(report.actions.contains { $0.name == "fresh" && $0.reason == "branch-switched" && $0.outcome == "stopped" })
-        XCTAssertTrue(report.actions.contains { $0.name == "idle" && $0.reason == "branch-switched" && $0.outcome == "removed" })
-        XCTAssertFalse(report.actions.contains { ["stopped", "current"].contains($0.name) })
-        for name in ["fresh", "stopped", "current"] {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini(name).path), name)
+        for name in ["booted", "stopped"] {
+            XCTAssertTrue(report.actions.contains { $0.name == name && $0.reason == "branch-switched" && $0.outcome == "removed" }, name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.toolchain.ini(name).path), name)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: f.toolchain.ini("idle").path))
+        XCTAssertFalse(report.actions.contains { $0.name == "current" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini("current").path))
         let running = await f.fake.running
         XCTAssertTrue(running.isEmpty)
     }
@@ -91,8 +89,7 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         let f = try fixture()
         let owner = try worktree(f, "repo")
         await f.fake.setHead(owner.path, "")
-        let old = Date().timeIntervalSince1970 - AVDCleanup.switchedRetention - 60
-        try await f.fake.createAVD("detached", owner: owner.path, branch: "feature/x", lastUsedAt: old)
+        try await f.fake.createAVD("detached", owner: owner.path, branch: "feature/x", lastUsedAt: Date().timeIntervalSince1970 - 60)
         let other = try worktree(f, "other")
         await f.fake.setHead(other.path, "refs/heads/main")
         try await f.fake.createAVD("no-branch", owner: other.path)
