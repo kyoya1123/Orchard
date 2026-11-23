@@ -43,8 +43,8 @@ struct AVDOwnerMarker: Codable, Equatable, Sendable {
     var lastUsedAt: Double? = nil
 }
 
-/// Stops and removes marked AVDs whose owner worktree no longer exists or was
-/// reused for another branch.
+/// Stops and removes marked AVDs whose owner worktree no longer exists, was
+/// reused for another branch, or was left on a detached HEAD.
 struct AVDCleanup: Sendable {
     typealias Command = ArtifactCleanup.Command
     let toolchain: AndroidToolchain
@@ -63,16 +63,24 @@ struct AVDCleanup: Sendable {
         self.shutdownPollInterval = shutdownPollInterval
     }
 
-    /// Detached HEADs, non-root paths and Git errors never count as a switch.
+    /// Per-worktree Git state of operations that detach HEAD while the branch is
+    /// still being worked on.
+    static let detachingOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"]
+
+    /// A detached HEAD counts as a switch unless a `detachingOperations` entry
+    /// exists. Non-root paths and Git errors never count as a switch.
     func branchSwitched(_ marker: AVDOwnerMarker) async -> Bool {
-        guard let branch = marker.branch, !branch.isEmpty else { return false }
-        func git(_ args: [String]) async -> String? {
-            try? await command("/usr/bin/git", ["--no-optional-locks", "-C", marker.worktreePath,
-                "-c", "core.fsmonitor=false"] + args).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let branch = marker.branch, !branch.isEmpty,
+              let output = try? await command("/usr/bin/git", ["--no-optional-locks", "-C", marker.worktreePath,
+                  "-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel", "--absolute-git-dir",
+                  "--symbolic-full-name", "HEAD"]) else { return false }
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard lines.count == 3, lines[0] == marker.worktreePath else { return false }
+        if lines[2].hasPrefix("refs/heads/") { return lines[2] != "refs/heads/" + branch }
+        let gitDirectory = URL(fileURLWithPath: lines[1])
+        return lines[2] == "HEAD" && !Self.detachingOperations.contains {
+            FileManager.default.fileExists(atPath: gitDirectory.appendingPathComponent($0).path)
         }
-        guard await git(["rev-parse", "--show-toplevel"]) == marker.worktreePath,
-              let current = await git(["symbolic-ref", "-q", "HEAD"]), current.hasPrefix("refs/heads/") else { return false }
-        return current != "refs/heads/" + branch
     }
 
     struct Candidate { let name: String; let marker: AVDOwnerMarker }

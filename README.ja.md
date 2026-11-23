@@ -84,7 +84,7 @@ OrchardはAndroidエミュレーターの作成や起動を行わず、持ち主
 
 `branch`と`lastUsedAt`（Unix秒）は省略できます。`lastUsedAt`は削除の時期に影響しません。
 
-そのworktreeが存在しなくなると、起動中なら対応するADBシリアルだけを`emu kill`で停止し、切断を確認してから`avdmanager delete avd`で削除します。worktreeが`branch`とは別のブランチに切り替わっている場合は、同じ手順で停止してから削除します。`branch`がない目印やdetached HEADでは、この規則を適用しません。目印のないAVDには一切触れず、名前や起動したディレクトリから所有者を推測しません。目印がシンボリックリンク・読めない・相対パスの場合や、worktreeにアクセスできない場合は残します。経過時間だけでは削除しません。Android SDKは`ANDROID_HOME`・`ANDROID_SDK_ROOT`・`~/Library/Android/sdk`、AVDの保存先は`ANDROID_AVD_HOME`・`~/.android/avd`の順に探します。
+そのworktreeが存在しなくなると、起動中なら対応するADBシリアルだけを`emu kill`で停止し、切断を確認してから`avdmanager delete avd`で削除します。worktreeが`branch`とは別のブランチに切り替わっている場合やdetached HEADの場合も、同じ手順で停止してから削除します。rebase・bisect・cherry-pick・revertの途中のdetached HEADや、`branch`がない目印では、この規則を適用しません。目印のないAVDには一切触れず、名前や起動したディレクトリから所有者を推測しません。目印がシンボリックリンク・読めない・相対パスの場合や、worktreeにアクセスできない場合は残します。経過時間だけでは削除しません。Android SDKは`ANDROID_HOME`・`ANDROID_SDK_ROOT`・`~/Library/Android/sdk`、AVDの保存先は`ANDROID_AVD_HOME`・`~/.android/avd`の順に探します。
 
 これは保持期間の制御で、容量の上限ではありません。削除した成果物は次回利用時に再ビルドします。cronやLaunchAgentの登録は不要です。Orchardを使わない間は整理せず、次の利用時に実行します。
 
