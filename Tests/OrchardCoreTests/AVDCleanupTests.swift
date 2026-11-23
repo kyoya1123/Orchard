@@ -98,18 +98,31 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini("shared").path))
     }
 
-    func testDetachedHeadOrUnknownBranchNeverCountsAsSwitch() async throws {
+    func testDetachedHeadCountsAsSwitchUnlessAnOperationIsInProgress() async throws {
         let f = try fixture()
-        let owner = try worktree(f, "repo")
-        await f.fake.setHead(owner.path, "")
-        try await f.fake.createAVD("detached", owner: owner.path, branch: "feature/x")
+        let idle = try worktree(f, "idle")
+        await f.fake.setHead(idle.path, "")
+        try await f.fake.createAVD("detached", owner: idle.path, branch: "feature/x")
+        var busy: [String] = []
+        for operation in AVDCleanup.detachingOperations {
+            let owner = try worktree(f, "busy-\(operation)")
+            await f.fake.setHead(owner.path, "")
+            try FileManager.default.createDirectory(at: owner.appendingPathComponent(".git/\(operation)"), withIntermediateDirectories: true)
+            try await f.fake.createAVD("busy-\(operation)", owner: owner.path, branch: "feature/y")
+            busy.append("busy-\(operation)")
+        }
         let other = try worktree(f, "other")
         await f.fake.setHead(other.path, "refs/heads/main")
         try await f.fake.createAVD("no-branch", owner: other.path)
+
         let report = await run(f, apply: true)
-        XCTAssertTrue(report.actions.isEmpty)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini("detached").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini("no-branch").path))
+        XCTAssertNil(report.error)
+        XCTAssertTrue(report.actions.contains { $0.name == "detached" && $0.reason == "branch-switched" && $0.outcome == "removed" })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.toolchain.ini("detached").path))
+        XCTAssertFalse(report.actions.contains { $0.name != "detached" })
+        for name in busy + ["no-branch"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini(name).path), name)
+        }
     }
 
     func testUnmarkedExistingAndExcludedAVDsAreNeverTouched() async throws {
@@ -173,9 +186,10 @@ actor AndroidFake {
             let path = arguments[flag + 1]
             guard let head = heads[path] else { throw OrchardError.message("not a git repository") }
             if arguments.contains("--show-toplevel") { return path }
-            if arguments.contains("symbolic-ref") {
-                if head.isEmpty { throw OrchardError.message("detached") }
-                return head
+            if arguments.contains("--symbolic-full-name") { return head.isEmpty ? "HEAD" : head }
+            if arguments.contains("--git-path") {
+                return arguments.indices.filter { arguments[$0] == "--git-path" }
+                    .map { path + "/.git/" + arguments[$0 + 1] }.joined(separator: "\n")
             }
         }
         if tool == toolchain.adb {

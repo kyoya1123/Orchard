@@ -63,7 +63,11 @@ struct AVDCleanup: Sendable {
         self.shutdownPollInterval = shutdownPollInterval
     }
 
-    /// Detached HEADs, non-root paths and Git errors never count as a switch.
+    /// Git detaches HEAD during these while the branch is still being worked on.
+    static let detachingOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"]
+
+    /// A detached HEAD counts as a switch unless a `detachingOperations` entry
+    /// exists. Non-root paths and Git errors never count as a switch.
     func branchSwitched(_ marker: AVDOwnerMarker) async -> Bool {
         guard let branch = marker.branch, !branch.isEmpty else { return false }
         func git(_ args: [String]) async -> String? {
@@ -71,8 +75,13 @@ struct AVDCleanup: Sendable {
                 "-c", "core.fsmonitor=false"] + args).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard await git(["rev-parse", "--show-toplevel"]) == marker.worktreePath,
-              let current = await git(["symbolic-ref", "-q", "HEAD"]), current.hasPrefix("refs/heads/") else { return false }
-        return current != "refs/heads/" + branch
+              let current = await git(["rev-parse", "--symbolic-full-name", "HEAD"]) else { return false }
+        if current.hasPrefix("refs/heads/") { return current != "refs/heads/" + branch }
+        guard current == "HEAD", let output = await git(["rev-parse", "--path-format=absolute"]
+                + Self.detachingOperations.flatMap { ["--git-path", $0] }) else { return false }
+        let paths = output.split(whereSeparator: \.isNewline).map(String.init)
+        return paths.count == Self.detachingOperations.count
+            && paths.allSatisfy { $0.hasPrefix("/") && !FileManager.default.fileExists(atPath: $0) }
     }
 
     struct Candidate { let name: String; let marker: AVDOwnerMarker }
