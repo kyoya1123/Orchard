@@ -411,9 +411,10 @@ public struct ArtifactCleanup: Sendable {
     }
 
     private func externalUsage() async throws -> ExternalUsage {
+        // Build services stay resident while Xcode is open, so only the files they
+        // hold, which the system-wide lsof below already reports, count as use.
         let buildRunning = try await processes().contains {
-            let name = URL(fileURLWithPath: $0.path).lastPathComponent
-            return name == "xcodebuild" || Self.buildServiceNames.contains(name)
+            URL(fileURLWithPath: $0.path).lastPathComponent == "xcodebuild"
         }
         if buildRunning { return ExternalUsage(buildRunning: true, openPaths: []) }
         let files = try await command("/usr/sbin/lsof", ["-nP", "-F", "pn"])

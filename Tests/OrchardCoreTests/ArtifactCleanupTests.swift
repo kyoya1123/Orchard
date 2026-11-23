@@ -389,6 +389,17 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" })
     }
 
+    func testIdleBuildServiceDoesNotProtectOldSimulator() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(closeWindow: { name, _, _ in await closed.add(name) })
+        let id = try await simulator(f, age: 3 * 86400)
+        await f.commands.addProcess("456", path: "/Applications/Xcode.app/Contents/SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/SWBBuildService.bundle/Contents/MacOS/SWBBuildService")
+        let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
+        let windows = await closed.items
+        XCTAssertEqual(windows, ["feature-example"])
+    }
+
     func testExternalWorktreeProcessAndExternalBuildProtectOldSimulator() async throws {
         for externalBuild in [true, false] {
             let f = try fixture()
