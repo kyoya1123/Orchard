@@ -63,11 +63,10 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         let f = try fixture()
         let owner = try worktree(f, "repo")
         await f.fake.setHead(owner.path, "refs/heads/other")
-        let now = Date().timeIntervalSince1970
-        try await f.fake.createAVD("booted", owner: owner.path, branch: "feature/booted", lastUsedAt: now - 60)
+        try await f.fake.createAVD("booted", owner: owner.path, branch: "feature/booted")
         await f.fake.boot("booted", serial: "emulator-5554")
-        try await f.fake.createAVD("stopped", owner: owner.path, branch: "feature/stopped", lastUsedAt: now - 60)
-        try await f.fake.createAVD("current", owner: owner.path, branch: "other", lastUsedAt: now - 60)
+        try await f.fake.createAVD("stopped", owner: owner.path, branch: "feature/stopped")
+        try await f.fake.createAVD("current", owner: owner.path, branch: "other")
 
         let preview = await run(f, apply: false)
         XCTAssertTrue(preview.actions.contains { $0.name == "booted" && $0.outcome == "would-remove" })
@@ -89,7 +88,7 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         let f = try fixture()
         let owner = try worktree(f, "repo")
         await f.fake.setHead(owner.path, "")
-        try await f.fake.createAVD("detached", owner: owner.path, branch: "feature/x", lastUsedAt: Date().timeIntervalSince1970 - 60)
+        try await f.fake.createAVD("detached", owner: owner.path, branch: "feature/x")
         let other = try worktree(f, "other")
         await f.fake.setHead(other.path, "refs/heads/main")
         try await f.fake.createAVD("no-branch", owner: other.path)
@@ -143,11 +142,11 @@ actor AndroidFake {
     func boot(_ name: String, serial: String) { running[serial] = name }
     func setHead(_ worktree: String, _ ref: String) { heads[worktree] = ref }
 
-    func createAVD(_ name: String, owner: String?, branch: String? = nil, lastUsedAt: Double? = nil) throws {
+    func createAVD(_ name: String, owner: String?, branch: String? = nil) throws {
         try FileManager.default.createDirectory(at: toolchain.directory(name), withIntermediateDirectories: true)
         try Data("path=\(toolchain.directory(name).path)\n".utf8).write(to: toolchain.ini(name))
         if let owner {
-            try JSONEncoder().encode(AVDOwnerMarker(worktreePath: owner, branch: branch, lastUsedAt: lastUsedAt))
+            try JSONEncoder().encode(AVDOwnerMarker(worktreePath: owner, branch: branch))
                 .write(to: toolchain.directory(name).appendingPathComponent(AVDOwnerMarker.fileName))
         }
     }

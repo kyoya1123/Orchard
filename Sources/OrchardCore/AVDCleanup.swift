@@ -34,8 +34,8 @@ struct AndroidToolchain: Sendable {
 
 /// Written by the tool that uses the AVD for a worktree, inside `<name>.avd/`.
 /// Orchard never creates AVDs and never infers ownership from an AVD's name or
-/// from the directory it was launched from. `branch` and `lastUsedAt` (Unix
-/// seconds) are optional; without `branch` only the missing-worktree rule applies.
+/// from the directory it was launched from. Without `branch` only the
+/// missing-worktree rule applies.
 struct AVDOwnerMarker: Codable, Sendable {
     static let fileName = "orchard-owner.json"
     let worktreePath: String

@@ -82,7 +82,7 @@ OrchardはAndroidエミュレーターの作成や起動を行わず、持ち主
 {"worktreePath": "/absolute/path/to/worktree", "branch": "feature/example", "lastUsedAt": 1793000000}
 ```
 
-`branch`と`lastUsedAt`（Unix秒）は省略できます。AVDを使うたびに書き直すと、利用日時として扱います。
+`branch`と`lastUsedAt`（Unix秒）は省略できます。`lastUsedAt`は削除の時期に影響しません。
 
 そのworktreeが存在しなくなると、起動中なら対応するADBシリアルだけを`emu kill`で停止し、切断を確認してから`avdmanager delete avd`で削除します。worktreeが`branch`とは別のブランチに切り替わっている場合は、同じ手順で停止してから削除します。`branch`がない目印やdetached HEADでは、この規則を適用しません。目印のないAVDには一切触れず、名前や起動したディレクトリから所有者を推測しません。目印がシンボリックリンク・読めない・相対パスの場合や、worktreeにアクセスできない場合は残します。経過時間だけでは削除しません。Android SDKは`ANDROID_HOME`・`ANDROID_SDK_ROOT`・`~/Library/Android/sdk`、AVDの保存先は`ANDROID_AVD_HOME`・`~/.android/avd`の順に探します。
 
