@@ -139,6 +139,7 @@ public final class BuildRunService: @unchecked Sendable {
                 .deletingLastPathComponent()
                 .appendingPathComponent("Applications/DeviceHub.app")
             if FileManager.default.fileExists(atPath: deviceHub.path) {
+                await DeviceWindowCloser.restoreMinimized(udid: udid)
                 attempts.insert(["-g", "-a", deviceHub.path, "devices://device/open?id=\(udid)"], at: 0)
             }
         }
