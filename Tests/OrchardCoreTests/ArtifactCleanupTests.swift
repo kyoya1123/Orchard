@@ -117,14 +117,13 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(windows, ["feature-example"])
     }
 
-    func testFilesOpenedByTheReusedFolderDoNotPinTheOldBranchDevice() async throws {
+    func testRecentShutdownDeviceOfFolderReusedForAnotherBranchIsRemoved() async throws {
         let f = try fixture()
-        let id = try await simulator(f, age: ArtifactCleanup.simulatorRetention + 60)
-        await f.commands.setDates(id, used: nil, booted: nil)
+        let id = try await simulator(f)
         await f.commands.setOpenPath(f.owner.worktreePath + "/Source.swift")
         await f.commands.setMerge("renamed-branch", worktree: f.owner.worktreePath)
         let report = await f.worker.run(apply: true, discover: false)
-        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "unused-over-1-day" && $0.outcome == "removed" })
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "branch-switched" && $0.outcome == "removed" })
 
         let same = try fixture()
         let kept = try await simulator(same, age: ArtifactCleanup.simulatorRetention + 60)
@@ -436,13 +435,15 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
     }
 
     func testMergedOwnerRequiresCleanNonDefaultBranchAndCachedAncestry() async throws {
-        for mode in ["merged", "dirty", "unmerged", "default", "detached", "missing-remote", "renamed-branch"] {
+        for mode in ["merged", "dirty", "unmerged", "default", "detached", "missing-remote"] {
             let f = try fixture()
             let id = try await simulator(f)
             await f.commands.setMerge(mode, worktree: f.owner.worktreePath)
             let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
             if mode == "merged" {
                 XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "merged-into-cached-origin-default" && $0.outcome == "removed" })
+            } else if mode == "default" {
+                XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "branch-switched" && $0.outcome == "removed" })
             } else {
                 XCTAssertTrue(report.actions.allSatisfy { $0.outcome == "preserved" }, mode)
             }

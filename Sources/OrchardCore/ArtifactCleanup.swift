@@ -389,6 +389,7 @@ public struct ArtifactCleanup: Sendable {
     private func simulatorReason(_ record: ArtifactSimulator, device: Device) async throws -> String? {
         guard !record.owners.isEmpty else { return nil }
         if try record.owners.allSatisfy({ try !worktreeExists($0) }) { return "missing-worktree" }
+        if await branchSwitched(record) { return "branch-switched" }
         if let lastUse = lastUse(record, device), lastUse < now().timeIntervalSince1970 - Self.simulatorRetention {
             return "unused-over-1-day"
         }
