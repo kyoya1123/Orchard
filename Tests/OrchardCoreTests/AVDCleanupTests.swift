@@ -84,6 +84,20 @@ final class AVDCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(running.isEmpty)
     }
 
+    func testMarkerReclaimedForCheckedOutBranchDuringShutdownIsPreserved() async throws {
+        let f = try fixture()
+        let owner = try worktree(f, "repo")
+        await f.fake.setHead(owner.path, "refs/heads/main")
+        try await f.fake.createAVD("shared", owner: owner.path, branch: "feature/a")
+        await f.fake.boot("shared", serial: "emulator-5554")
+        await f.fake.reclaimOnKill("shared", owner: owner.path, branch: "main")
+
+        let report = await run(f, apply: true)
+        XCTAssertNotNil(report.error)
+        XCTAssertTrue(report.actions.contains { $0.name == "shared" && $0.outcome == "stopped-preserved" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.toolchain.ini("shared").path))
+    }
+
     func testDetachedHeadOrUnknownBranchNeverCountsAsSwitch() async throws {
         let f = try fixture()
         let owner = try worktree(f, "repo")
@@ -137,7 +151,10 @@ actor AndroidFake {
     var commands: [[String]] = []
     var running: [String: String] = [:]
     var heads: [String: String] = [:]
+    var reclaims: [String: (owner: String, branch: String)] = [:]
     init(toolchain: AndroidToolchain) { self.toolchain = toolchain }
+
+    func reclaimOnKill(_ name: String, owner: String, branch: String) { reclaims[name] = (owner, branch) }
 
     func boot(_ name: String, serial: String) { running[serial] = name }
     func setHead(_ worktree: String, _ ref: String) { heads[worktree] = ref }
@@ -170,7 +187,9 @@ actor AndroidFake {
             }
             if arguments.count == 4, arguments[2...] == ["emu", "kill"] {
                 commands.append(arguments)
-                running.removeValue(forKey: arguments[1])
+                if let name = running.removeValue(forKey: arguments[1]), let reclaim = reclaims[name] {
+                    try createAVD(name, owner: reclaim.owner, branch: reclaim.branch)
+                }
                 return ""
             }
         }

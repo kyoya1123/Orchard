@@ -36,7 +36,7 @@ struct AndroidToolchain: Sendable {
 /// Orchard never creates AVDs and never infers ownership from an AVD's name or
 /// from the directory it was launched from. Without `branch` only the
 /// missing-worktree rule applies.
-struct AVDOwnerMarker: Codable, Sendable {
+struct AVDOwnerMarker: Codable, Equatable, Sendable {
     static let fileName = "orchard-owner.json"
     let worktreePath: String
     var branch: String? = nil
@@ -190,8 +190,7 @@ struct AVDCleanup: Sendable {
                 }
                 running = nil
                 let stillEligible = missing ? try isMissing(worktree) : await branchSwitched(candidate.marker)
-                guard stillEligible, try marked().contains(where: { $0.name == name && $0.marker.worktreePath == worktree
-                        && $0.marker.lastUsedAt == candidate.marker.lastUsedAt }),
+                guard stillEligible, try marked().contains(where: { $0.name == name && $0.marker == candidate.marker }),
                       try await !runningAVDs().values.contains(name) else {
                     throw OrchardError.message("Emulator still running or AVD/worktree changed")
                 }
