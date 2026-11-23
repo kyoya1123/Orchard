@@ -104,7 +104,7 @@ public struct ArtifactCleanup: Sendable {
                 try await cleanSimulators(settings: settings, apply: apply, report: &report)
             }
             if [.all, .devices, .emulators].contains(scope) {
-                await AVDCleanup(toolchain: toolchain, command: command, now: now)
+                await AVDCleanup(toolchain: toolchain, command: command)
                     .run(apply: apply, excluded: { excluded(path: $0, settings: settings) }, report: &report)
             }
             if scope == .all || scope == .sourcePackages {

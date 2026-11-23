@@ -99,9 +99,9 @@ Orchard does not create or run Android emulators; it only deletes AVDs whose own
 {"worktreePath": "/absolute/path/to/worktree", "branch": "feature/example", "lastUsedAt": 1793000000}
 ```
 
-`branch` and `lastUsedAt` (Unix seconds) are optional; rewriting the marker on each use records the last use.
+`branch` and `lastUsedAt` (Unix seconds) are optional. `lastUsedAt` does not affect when an AVD is deleted.
 
-When that worktree no longer exists, a running emulator for the AVD is stopped with `emu kill` on its own ADB serial, its disconnect is confirmed, and the AVD is deleted with `avdmanager delete avd`. When the worktree has a branch other than `branch` checked out, a running emulator is stopped, and the AVD is deleted once `lastUsedAt` is more than a day old. Markers without `branch`, and detached HEADs, never trigger this rule. AVDs without the marker are never touched; ownership is never inferred from names or launch directories. A symlinked or unreadable marker, a relative path or an inaccessible worktree preserves the AVD, and age alone never removes one. The Android SDK is located through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, then `~/Library/Android/sdk`; AVDs through `ANDROID_AVD_HOME`, then `~/.android/avd`.
+When that worktree no longer exists, a running emulator for the AVD is stopped with `emu kill` on its own ADB serial, its disconnect is confirmed, and the AVD is deleted with `avdmanager delete avd`. When the worktree has a branch other than `branch` checked out, a running emulator is stopped the same way and the AVD is deleted. Markers without `branch`, and detached HEADs, never trigger this rule. AVDs without the marker are never touched; ownership is never inferred from names or launch directories. A symlinked or unreadable marker, a relative path or an inaccessible worktree preserves the AVD, and age alone never removes one. The Android SDK is located through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, then `~/Library/Android/sdk`; AVDs through `ANDROID_AVD_HOME`, then `~/.android/avd`.
 
 ## Requirements
 
