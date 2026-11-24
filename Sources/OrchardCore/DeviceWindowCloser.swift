@@ -7,35 +7,46 @@ import Foundation
 enum DeviceWindowCloser {
     struct Window: Equatable { let identifier: String; let title: String }
 
-    static func title(name: String, runtime: String) throws -> String {
+    static func title(name: String, runtime: String, deviceType: String?) throws -> String {
         let prefix = "com.apple.CoreSimulator.SimRuntime.iOS-"
         guard runtime.hasPrefix(prefix) else { throw OrchardError.message("Unknown window runtime; close the target window manually") }
-        let version = runtime.dropFirst(prefix.count).replacingOccurrences(of: "-", with: ".")
-        return "\(name) – iOS \(version)"
+        // Device-specific runtimes (iOS-27-2-iPhone19-4) are titled with the OS version only.
+        let version = runtime.dropFirst(prefix.count).split(separator: "-")
+            .prefix { !$0.isEmpty && $0.allSatisfy(\.isNumber) }.joined(separator: ".")
+        guard !version.isEmpty else { throw OrchardError.message("Unknown window runtime; close the target window manually") }
+        let typePrefix = "com.apple.CoreSimulator.SimDeviceType."
+        let platform: String
+        if deviceType?.hasPrefix(typePrefix + "iPad") == true {
+            platform = "iPadOS"
+        } else if deviceType?.hasPrefix(typePrefix + "iPhone") == true {
+            platform = "iOS"
+        } else {
+            throw OrchardError.message("Unknown window device type; close the target window manually")
+        }
+        return "\(name) – \(platform) \(version)"
     }
 
-    static func match(_ windows: [Window], name: String, runtime: String) throws -> Window? {
+    /// Several windows may share the title: Device Hub keeps the window of a
+    /// deleted device open. When no other existing device has the title
+    /// (`uniqueDevice`), each of them belongs to this device or a deleted one.
+    static func match(_ windows: [Window], name: String, title expected: String, uniqueDevice: Bool) throws -> [Window] {
         guard !windows.contains(where: { $0.identifier.hasPrefix("mainWindow") }) else {
             throw OrchardError.message("Device Hub full window may contain multiple device tabs; close the target tab manually")
         }
         guard windows.allSatisfy({ $0.identifier.hasPrefix("deviceWindow-AppWindow-") && !$0.title.isEmpty }) else {
             throw OrchardError.message("Unreadable Device Hub window identity")
         }
-        let expected = try title(name: name, runtime: runtime)
         let targets = windows.filter { $0.title == expected }
-        guard targets.count <= 1 else { throw OrchardError.message("Ambiguous Device Hub windows; no window was closed") }
-        guard let target = targets.first else {
+        guard !targets.isEmpty else {
             // A same-name window with an unrecognized title must not be mistaken
             // for no window. Main inventory windows are never closed.
             guard !windows.contains(where: { $0.title == name || $0.title.hasPrefix(name + " – ") }) else {
                 throw OrchardError.message("Device Hub window identity changed; close it manually")
             }
-            return nil
+            return []
         }
-        guard target.identifier.hasPrefix("deviceWindow-AppWindow-") else {
-            throw OrchardError.message("Device Hub target is not a standalone compact window; close its tab manually")
-        }
-        return target
+        guard uniqueDevice else { throw OrchardError.message("Multiple devices share the target window title") }
+        return targets
     }
 
     static func accessReport() -> CleanupReport.Action? {
@@ -53,7 +64,7 @@ enum DeviceWindowCloser {
     @MainActor static func restoreMinimized(udid: String) async {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
         guard apps.count == 1, AXIsProcessTrusted() else { return }
-        struct Device: Decodable { let udid: String; let name: String }
+        struct Device: Decodable { let udid: String; let name: String; let deviceTypeIdentifier: String? }
         struct DeviceList: Decodable { let devices: [String: [Device]] }
         // Destinations carry runtime labels that differ by source, so the
         // window title is built from simctl's runtime identifier instead.
@@ -63,7 +74,7 @@ enum DeviceWindowCloser {
               let (runtime, device) = list.devices.lazy.compactMap({ runtime, devices in
                   devices.first { $0.udid == udid }.map { (runtime, $0) }
               }).first,
-              let title = try? title(name: device.name, runtime: runtime) else { return }
+              let title = try? title(name: device.name, runtime: runtime, deviceType: device.deviceTypeIdentifier) else { return }
         let app = AXUIElementCreateApplication(apps[0].processIdentifier)
         AXUIElementSetMessagingTimeout(app, 0.2)
         func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -100,7 +111,8 @@ enum DeviceWindowCloser {
         }
     }
 
-    @MainActor static func close(name: String, runtime: String, uniqueDevice: Bool) async throws {
+    @MainActor static func close(name: String, runtime: String, deviceType: String?, uniqueDevice: Bool) async throws {
+        let expected = try title(name: name, runtime: runtime, deviceType: deviceType)
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
         let legacy = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
         guard legacy.isEmpty else { throw OrchardError.message("Legacy Simulator window mapping is unsupported; close the target window manually") }
@@ -130,29 +142,35 @@ enum DeviceWindowCloser {
             }
         }
         let before = try snapshot()
-        guard let target = try match(before.map(\.0), name: name, runtime: runtime),
-              let element = before.first(where: { $0.0 == target })?.1 else { return }
-        guard uniqueDevice else { throw OrchardError.message("Multiple devices share the target window title") }
-        if let tabs = try read(element, "AXTabs") as? [AXUIElement], tabs.count > 1 {
-            throw OrchardError.message("Device Hub window has multiple tabs; close the target tab manually")
+        let targets = try match(before.map(\.0), name: name, title: expected, uniqueDevice: uniqueDevice)
+        // Every target is checked before the first UI mutation.
+        let closable = try targets.map { target in
+            guard let element = before.first(where: { $0.0 == target })?.1 else {
+                throw OrchardError.message("Device Hub window changed before close")
+            }
+            if let tabs = try read(element, "AXTabs") as? [AXUIElement], tabs.count > 1 {
+                throw OrchardError.message("Device Hub window has multiple tabs; close the target tab manually")
+            }
+            guard let value = try read(element, kAXCloseButtonAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else {
+                throw OrchardError.message("Target window has no accessible close button")
+            }
+            return (target, element, unsafeDowncast(value, to: AXUIElement.self))
         }
-        guard let value = try read(element, kAXCloseButtonAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            throw OrchardError.message("Target window has no accessible close button")
-        }
-        // Recheck immediately before the only UI mutation.
-        guard try read(element, kAXTitleAttribute) as? String == target.title,
-              try read(element, kAXIdentifierAttribute) as? String == target.identifier else {
-            throw OrchardError.message("Device Hub window changed before close")
-        }
-        let button = unsafeDowncast(value, to: AXUIElement.self)
-        AXUIElementSetMessagingTimeout(button, 0.2)
-        guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
-            throw OrchardError.message("Target window close was not confirmed")
+        guard !closable.isEmpty else { return }
+        for (target, element, button) in closable {
+            guard try read(element, kAXTitleAttribute) as? String == target.title,
+                  try read(element, kAXIdentifierAttribute) as? String == target.identifier else {
+                throw OrchardError.message("Device Hub window changed before close")
+            }
+            AXUIElementSetMessagingTimeout(button, 0.2)
+            guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
+                throw OrchardError.message("Target window close was not confirmed")
+            }
         }
         while true {
             let current = try snapshot().map(\.0)
-            if !current.contains(target) {
-                guard try match(current, name: name, runtime: runtime) == nil else {
+            if !current.contains(where: targets.contains) {
+                guard try match(current, name: name, title: expected, uniqueDevice: uniqueDevice).isEmpty else {
                     throw OrchardError.message("Device window reopened")
                 }
                 return

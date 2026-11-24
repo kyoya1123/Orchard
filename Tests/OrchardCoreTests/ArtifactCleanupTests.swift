@@ -14,7 +14,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
     }
 
     func fixture(existing: Bool = true, realGit: Bool = false,
-                 closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in }) throws -> Fixture {
+                 closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in }) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("Orchard Cleanup Tests-\(UUID().uuidString)").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -43,12 +43,13 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
     }
 
     func simulator(_ f: Fixture, name: String = "feature-example", state: String = "Shutdown",
-                   age: TimeInterval = 0, owners: Set<ArtifactOwner>? = nil) async throws -> String {
+                   age: TimeInterval = 0, owners: Set<ArtifactOwner>? = nil,
+                   deviceType: String = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro") async throws -> String {
         let id = UUID().uuidString
         let record = ArtifactSimulator(udid: id, name: name, owners: owners ?? [f.owner],
                                        lastUsedAt: clock.timeIntervalSince1970 - age)
         try f.store.write(record, to: f.store.simulatorURL(id))
-        await f.commands.add(id, name: name, state: state, date: Date(timeIntervalSince1970: record.lastUsedAt))
+        await f.commands.add(id, name: name, state: state, date: Date(timeIntervalSince1970: record.lastUsedAt), deviceType: deviceType)
         return id
     }
 
@@ -65,7 +66,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
 
     func testBootedOrphanIsWindowClosedStoppedAndRemovedWhenWorktreeIsMissing() async throws {
         let closed = ClosedWindows()
-        let f = try fixture(existing: false, closeWindow: { name, runtime, unique in await closed.add("\(name)|\(runtime)|\(unique)") })
+        let f = try fixture(existing: false, closeWindow: { name, runtime, _, unique in await closed.add("\(name)|\(runtime)|\(unique)") })
         let id = try await simulator(f, state: "Booted")
         let dd = try cache(f)
         let report = await f.worker.run(apply: true, discover: false)
@@ -75,7 +76,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dd.path))
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "missing-worktree" && $0.outcome == "removed" })
         let windows = await closed.items
-        XCTAssertEqual(windows, ["feature-example|runtime|true"])
+        XCTAssertEqual(windows, ["feature-example|\(CleanupCommands.runtime)|true"])
     }
 
     func testBootedOrphanPreviewDoesNotStopAndReportsShutdown() async throws {
@@ -99,7 +100,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
 
     func testBootedDeviceOfFolderReusedForAnotherBranchIsOnlyStopped() async throws {
         let closed = ClosedWindows()
-        let f = try fixture(closeWindow: { name, _, _ in await closed.add(name) })
+        let f = try fixture(closeWindow: { name, _, _, _ in await closed.add(name) })
         let id = try await simulator(f, state: "Booted")
         await f.commands.setMerge("renamed-branch", worktree: f.owner.worktreePath)
         let preview = await f.worker.run(apply: false, discover: false)
@@ -146,8 +147,23 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testSameNamedDevicesCloseSharedTitleWindowsWithTheLastRemoval() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(existing: false, closeWindow: { _, _, type, unique in
+            await closed.add("\(type?.components(separatedBy: ".").last ?? "")|\(unique)")
+        })
+        for type in ["iPhone-17-Pro", "iPhone-Duo", "iPad-Pro-11-inch-M5-12GB"] {
+            _ = try await simulator(f, deviceType: "com.apple.CoreSimulator.SimDeviceType." + type)
+        }
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertEqual(report.actions.filter { $0.outcome == "removed" }.count, 3)
+        let windows = await closed.items
+        XCTAssertEqual(windows.filter { $0.hasPrefix("iPad") }, ["iPad-Pro-11-inch-M5-12GB|true"])
+        XCTAssertEqual(windows.filter { $0.hasPrefix("iPhone") }.map { $0.hasSuffix("|true") }, [false, true])
+    }
+
     func testWindowCloseFailureDoesNotPreventRemoval() async throws {
-        let f = try fixture(existing: false, closeWindow: { _, _, _ in throw OrchardError.message("Window close requires Accessibility permission") })
+        let f = try fixture(existing: false, closeWindow: { _, _, _, _ in throw OrchardError.message("Window close requires Accessibility permission") })
         let id = try await simulator(f)
         let report = await f.worker.run(apply: true, discover: false)
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
@@ -390,7 +406,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
 
     func testIdleBuildServiceDoesNotProtectOldSimulator() async throws {
         let closed = ClosedWindows()
-        let f = try fixture(closeWindow: { name, _, _ in await closed.add(name) })
+        let f = try fixture(closeWindow: { name, _, _, _ in await closed.add(name) })
         let id = try await simulator(f, age: 3 * 86400)
         await f.commands.addProcess("456", path: "/Applications/Xcode.app/Contents/SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/SWBBuildService.bundle/Contents/MacOS/SWBBuildService")
         let report = await f.worker.run(apply: true, discover: false, scope: .simulators)
@@ -511,8 +527,10 @@ actor CleanupCommands {
     }
     func setMerge(_ mode: String, worktree: String) { mergeMode = mode; mergeWorktree = worktree }
 
-    func add(_ id: String, name: String, state: String, date: Date) {
-        devices[id] = ["udid": id, "name": name, "state": state,
+    static let runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+    func add(_ id: String, name: String, state: String, date: Date,
+             deviceType: String = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro") {
+        devices[id] = ["udid": id, "name": name, "state": state, "deviceTypeIdentifier": deviceType,
                        "lastUsedAt": ISO8601DateFormatter().string(from: date)]
     }
     func failShutdown() { shutdownFails = true }
@@ -551,7 +569,7 @@ actor CleanupCommands {
         verbs.append(verb)
         switch verb {
         case "list":
-            return String(decoding: try JSONSerialization.data(withJSONObject: ["devices": ["runtime": Array(devices.values)]]), as: UTF8.self)
+            return String(decoding: try JSONSerialization.data(withJSONObject: ["devices": [Self.runtime: Array(devices.values)]]), as: UTF8.self)
         case "shutdown":
             if shutdownFails { throw OrchardError.message("Shutdown failed") }
             devices[args[4]]?["state"] = "Shutdown"

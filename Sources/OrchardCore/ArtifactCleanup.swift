@@ -29,7 +29,7 @@ public struct ArtifactCleanup: Sendable {
     let toolchain: AndroidToolchain
     let command: Command
     let now: @Sendable () -> Date
-    let closeWindow: @Sendable (String, String, Bool) async throws -> Void
+    let closeWindow: @Sendable (String, String, String?, Bool) async throws -> Void
     let windowAccess: (@Sendable () async -> CleanupReport.Action?)?
     let runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)?
     static let retention: TimeInterval = 7 * 86400
@@ -41,7 +41,7 @@ public struct ArtifactCleanup: Sendable {
                   devices: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
                   sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"),
                   runtimeMaintenance: { await SimulatorBaseService().maintain() },
-                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, uniqueDevice: $2) },
+                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, deviceType: $2, uniqueDevice: $3) },
                   windowAccess: { DeviceWindowCloser.accessReport() })
     }
 
@@ -49,7 +49,7 @@ public struct ArtifactCleanup: Sendable {
          toolchain: AndroidToolchain = AndroidToolchain(),
          now: @escaping @Sendable () -> Date = { Date() },
          runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)? = nil,
-         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
+         closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in },
          windowAccess: (@Sendable () async -> CleanupReport.Action?)? = nil,
          command: @escaping Command = { executable, arguments in
              // CoreSimulator, ADB and avdmanager IPC can stall indefinitely at
@@ -78,6 +78,7 @@ public struct ArtifactCleanup: Sendable {
         let lastBootedAt: String?
         let lastUsedAt: String?
         let dataPathSize: Int64?
+        let deviceTypeIdentifier: String?
         var runtimeIdentifier: String? = nil
     }
     struct DeviceList: Decodable { let devices: [String: [Device]] }
@@ -464,11 +465,17 @@ public struct ArtifactCleanup: Sendable {
         return try record.owners.allSatisfy { try !worktreeExists($0) }
     }
 
-    private func closeWindow(of device: Device, inventory: [Device], report: inout CleanupReport) async {
+    private func closeWindow(of device: Device, report: inout CleanupReport) async {
         guard let runtime = device.runtimeIdentifier else { return }
-        let unique = inventory.filter { $0.name == device.name && $0.runtimeIdentifier == runtime }.count == 1
+        func title(_ device: Device) -> String? {
+            device.runtimeIdentifier.flatMap {
+                try? DeviceWindowCloser.title(name: device.name, runtime: $0, deviceType: device.deviceTypeIdentifier)
+            }
+        }
         do {
-            try await closeWindow(device.name, runtime, unique)
+            // Read fresh: a device deleted earlier in this pass no longer competes for the title.
+            let unique = try await deviceList().filter { $0.name == device.name && title($0) == title(device) }.count == 1
+            try await closeWindow(device.name, runtime, device.deviceTypeIdentifier, unique)
         } catch {
             report.actions.append(.init(target: device.udid, reason: "window-left-open: \(error)", outcome: "skipped", name: device.name))
         }
@@ -522,7 +529,7 @@ public struct ArtifactCleanup: Sendable {
                         report.actions.append(action("booted-or-transitioning", "preserved")); continue
                     }
                     guard apply else { report.actions.append(action("branch-switched", "would-stop")); continue }
-                    await closeWindow(of: device, inventory: inventory, report: &report)
+                    await closeWindow(of: device, report: &report)
                     shutdownRequested = true
                     _ = try await simctl(["shutdown", device.udid])
                     guard let stopped = try await deviceList().first(where: { $0.udid == device.udid }),
@@ -551,7 +558,7 @@ public struct ArtifactCleanup: Sendable {
                     }
                 }
                 if apply {
-                    await closeWindow(of: device, inventory: inventory, report: &report)
+                    await closeWindow(of: device, report: &report)
                     if booted {
                         shutdownRequested = true
                         _ = try await simctl(["shutdown", device.udid])
