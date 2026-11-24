@@ -19,7 +19,7 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(try SimulatorBaseService.hasNoAppBundles(in: root))
     }
 
-    private func fixture(closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in }) throws -> (SimulatorBaseService, SimulatorFixture, URL) {
+    private func fixture(closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in }) throws -> (SimulatorBaseService, SimulatorFixture, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("OrchardBaseTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -198,7 +198,7 @@ final class SimulatorBaseTests: XCTestCase, @unchecked Sendable {
     }
 
     func testFailedWindowCloseDoesNotBlockReplacement() async throws {
-        let (service, fake, _) = try fixture(closeWindow: { _, _, _ in throw OrchardError.message("Window close failed") })
+        let (service, fake, _) = try fixture(closeWindow: { _, _, _, _ in throw OrchardError.message("Window close failed") })
         let first = try await service.prepare(name: "branch")
         await fake.setRuntimeBuild("24A999")
         let replacement = try await service.prepare(name: "branch")

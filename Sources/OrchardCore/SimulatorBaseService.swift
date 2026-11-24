@@ -18,7 +18,7 @@ public struct SimulatorBaseService: Sendable {
     private let destinationSet: URL
     private let command: Command
     private let store: ArtifactStore
-    private let closeWindow: @Sendable (String, String, Bool) async throws -> Void
+    private let closeWindow: @Sendable (String, String, String?, Bool) async throws -> Void
 
     public init() {
         self.init(root: FileManager.default.homeDirectoryForCurrentUser
@@ -26,11 +26,11 @@ public struct SimulatorBaseService: Sendable {
                   destinationSet: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
                   store: ArtifactStore(),
-                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, uniqueDevice: $2) })
+                  closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, deviceType: $2, uniqueDevice: $3) })
     }
 
     init(root: URL, destinationSet: URL, store: ArtifactStore? = nil,
-         closeWindow: @escaping @Sendable (String, String, Bool) async throws -> Void = { _, _, _ in },
+         closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in },
          command: @escaping Command = { tool, arguments, timeout in
              try await SimulatorProcess.run(tool: tool, arguments: arguments, timeout: timeout)
          }) {
@@ -193,7 +193,7 @@ public struct SimulatorBaseService: Sendable {
                     continue
                 }
                 do {
-                    try await closeWindow(entry.name, entry.configuration.runtime, true)
+                    try await closeWindow(entry.name, entry.configuration.runtime, entry.configuration.deviceType, true)
                 } catch {
                     progress("Device Hub window for base \(entry.udid) left open: \(error)")
                 }
@@ -323,7 +323,7 @@ public struct SimulatorBaseService: Sendable {
                 // The replacement shares this name and runtime, so its window title
                 // is ambiguous and the close attempt is expected to be skipped.
                 do {
-                    try await closeWindow(clone.name, clone.runtime, false)
+                    try await closeWindow(clone.name, clone.runtime, device.deviceTypeIdentifier, false)
                 } catch {
                     progress("Device Hub window for \(clone.name) (\(clone.udid)) left open: \(error)")
                 }
