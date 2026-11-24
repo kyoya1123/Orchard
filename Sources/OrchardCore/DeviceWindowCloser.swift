@@ -87,6 +87,19 @@ enum DeviceWindowCloser {
         }
     }
 
+    /// While the app is hidden (Cmd-H, Hide Others), Device Hub also opens a
+    /// second window instead of showing the existing one, minimized or not.
+    @MainActor static func unhide() async {
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
+        guard apps.count == 1, apps[0].isHidden else { return }
+        apps[0].unhide()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline,
+              NSRunningApplication(processIdentifier: apps[0].processIdentifier)?.isHidden == true {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @MainActor static func close(name: String, runtime: String, uniqueDevice: Bool) async throws {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
         let legacy = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
