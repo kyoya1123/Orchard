@@ -12,6 +12,12 @@ Builds are handled by `BuildRunService`.
   - `xcodebuild <project args> -scheme <scheme> -destination <destination> build`
   - Orchard intentionally does not pass `-derivedDataPath`.
   - This lets `xcodebuild` use the standard Xcode DerivedData location, so it can share cache behavior with normal Xcode builds.
+- xcslot build (`XcslotBuilder`): used instead of the plain build when an `xcslot` executable is found (`ORCHARD_XCSLOT=0` disables; an absolute path selects one; otherwise `PATH`, then `/opt/homebrew/bin` and `/usr/local/bin`) and the project root is inside a git work tree.
+  - `xcslot xcodebuild --products-to <products> <project args> -scheme <scheme> -destination <destination> build`, run from the project root through the same streaming runner, so `stop`/SIGTERM reach xcslot, which forwards them to xcodebuild.
+  - `<products>` is `~/Library/Caches/Orchard/Products-v1/<key of destination id>`: xcslot copies the build's `Build/Products` there, because slot products are only valid until the slot's next build. Keyed by destination because one run per destination is enforced. Each xcslot build first removes other destinations' directories unused for seven days.
+  - The `-derivedDataPath` is then xcslot's slot, not Orchard's; Orchard itself still never passes it. No `-clonedSourcePackagesDirPath` is passed for this build (the slot keeps its own warm SourcePackages); `SourcePackageCache` still wraps the build for `buildSettings`, the project lease and activity.
+  - The app is `XcodeBuildSettings.runnableApp(inProducts:)`: the `firstRunnableApp` entry with `TARGET_BUILD_DIR` re-rooted from `BUILD_DIR` into `<products>`.
+  - xcslot failures are never retried as a plain build; the error carries the last `xcslot:` lines from its stderr.
 - Build product lookup:
   - `xcodebuild ... -showBuildSettings -json`
   - `XcodeBuildSettings.firstRunnableApp` finds the first `.app` with a bundle identifier.
@@ -84,6 +90,8 @@ Fallback scanning also checks `.worktrees` and `.claude/worktrees`.
   - APFS-cloned SPM templates, per-project process locks, path rebasing, and bounded immutable snapshots. `schemes`, build and buildSettings must keep the same package arguments. The lease ends before app launch/console attachment. Cleanup also prunes templates unused for 30 days (template mtime is last use) and repository caches left empty.
 - `Sources/OrchardCore/BuildRunService.swift`
   - Build/install/launch/stop implementation.
+- `Sources/OrchardCore/XcslotBuilder.swift`
+  - xcslot lookup, `--products-to` directory and argv for the optional xcslot build.
 - `Sources/OrchardCore/DeviceLockDetector.swift`
   - Classifies a failed `devicectl` command's output as "device is locked".
 - `Sources/OrchardCore/XcodeModels.swift`
