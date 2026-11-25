@@ -33,6 +33,7 @@ public struct ArtifactCleanup: Sendable {
     let windowAccess: (@Sendable () async -> CleanupReport.Action?)?
     let runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)?
     static let retention: TimeInterval = 7 * 86400
+    static let templateRetention: TimeInterval = 30 * 86400
     static let simulatorRetention: TimeInterval = 86400
 
     public init() {
@@ -611,8 +612,9 @@ public struct ArtifactCleanup: Sendable {
         for repository in try FileManager.default.contentsOfDirectory(at: sourcePackages, includingPropertiesForKeys: nil) {
             guard try ordinary(repository) else { continue }
             let worktrees = repository.appendingPathComponent("worktrees")
-            guard FileManager.default.fileExists(atPath: worktrees.path), try ordinary(worktrees) else { continue }
-            for directory in try FileManager.default.contentsOfDirectory(at: worktrees, includingPropertiesForKeys: nil) {
+            let hasWorktreeDirectory = try FileManager.default.fileExists(atPath: worktrees.path) && ordinary(worktrees)
+            let checkouts = hasWorktreeDirectory ? try FileManager.default.contentsOfDirectory(at: worktrees, includingPropertiesForKeys: nil) : []
+            for directory in checkouts {
                 do {
                     guard try ordinary(directory) else { continue }
                     guard let receipt = try store.read(SourcePackageOwnership.self, at: directory.appendingPathComponent("owner.json")),
@@ -655,6 +657,57 @@ public struct ArtifactCleanup: Sendable {
                     report.actions.append(.init(target: directory.path, reason: "package-inspection-failed: \(error)", outcome: "preserved"))
                 }
             }
+            do {
+                try cleanPackageTemplates(in: repository, apply: apply, report: &report)
+            } catch {
+                report.actions.append(.init(target: repository.path, reason: "package-inspection-failed: \(error)", outcome: "preserved"))
+            }
         }
+    }
+
+    private func cleanPackageTemplates(in repository: URL, apply: Bool, report: inout CleanupReport) throws {
+        let fileManager = FileManager.default
+        func ordinary(_ url: URL) -> Bool {
+            let value = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return value?.isDirectory == true && value?.isSymbolicLink != true
+        }
+        func entries(_ url: URL) throws -> [String] {
+            fileManager.fileExists(atPath: url.path) ? try fileManager.contentsOfDirectory(atPath: url.path) : []
+        }
+        let templates = repository.appendingPathComponent("templates")
+        let worktrees = repository.appendingPathComponent("worktrees")
+        let candidates = ordinary(templates)
+            ? try entries(templates).filter { $0.count == 64 && ordinary(templates.appendingPathComponent($0)) }.sorted() : []
+        let noWorktrees = try entries(worktrees).isEmpty
+        guard !candidates.isEmpty || (apply && noWorktrees) else { return }
+        guard let lease = try ArtifactLease.tryAcquire(repository.appendingPathComponent("templates.lock")) else {
+            for name in candidates {
+                report.actions.append(.init(target: templates.appendingPathComponent(name).path, reason: "active-package-cache", outcome: "preserved"))
+            }
+            return
+        }
+        defer { lease.close() }
+        let cutoff = now().addingTimeInterval(-Self.templateRetention)
+        for name in candidates {
+            let template = templates.appendingPathComponent(name)
+            // prepare and publish touch the template on every use, so its mtime is the last use.
+            guard let modified = try template.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                  modified < cutoff else { continue }
+            if apply { try fileManager.removeItem(at: template) }
+            report.actions.append(.init(target: template.path, reason: "stale-package-template", outcome: apply ? "removed" : "would-remove"))
+        }
+        guard apply, try entries(worktrees).isEmpty, try entries(templates).isEmpty else { return }
+        let locks = repository.appendingPathComponent("locks")
+        guard Set(try entries(repository)).isSubset(of: ["templates", "locks", "templates.lock", "worktrees"]),
+              try entries(locks).allSatisfy({ $0.hasSuffix(".lock") }) else { return }
+        // A build holds its project lock before it writes into worktrees/.
+        var projectLeases: [ArtifactLease] = []
+        defer { projectLeases.forEach { $0.close() } }
+        for name in try entries(locks) {
+            guard let projectLease = try ArtifactLease.tryAcquire(locks.appendingPathComponent(name)) else { return }
+            projectLeases.append(projectLease)
+        }
+        try fileManager.removeItem(at: repository)
+        report.actions.append(.init(target: repository.path, reason: "empty-package-repository", outcome: "removed"))
     }
 }
