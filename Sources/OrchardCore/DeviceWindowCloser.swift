@@ -49,6 +49,22 @@ enum DeviceWindowCloser {
         return targets
     }
 
+    /// The runtime and device type of a device deleted outside Orchard are
+    /// unknown, so every platform's window of that name is matched. Callers
+    /// must first confirm that no existing device has the name.
+    static func matchDeleted(_ windows: [Window], name: String) throws -> [Window] {
+        guard !windows.contains(where: { $0.identifier.hasPrefix("mainWindow") }) else {
+            throw OrchardError.message("Device Hub full window may contain multiple device tabs; close the target tab manually")
+        }
+        guard windows.allSatisfy({ $0.identifier.hasPrefix("deviceWindow-AppWindow-") && !$0.title.isEmpty }) else {
+            throw OrchardError.message("Unreadable Device Hub window identity")
+        }
+        guard !windows.contains(where: { $0.title == name }) else {
+            throw OrchardError.message("Device Hub window identity changed; close it manually")
+        }
+        return windows.filter { $0.title.hasPrefix(name + " – ") }
+    }
+
     static func accessReport() -> CleanupReport.Action? {
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices").isEmpty else { return nil }
         let trusted = AXIsProcessTrusted()
@@ -113,6 +129,14 @@ enum DeviceWindowCloser {
 
     @MainActor static func close(name: String, runtime: String, deviceType: String?, uniqueDevice: Bool) async throws {
         let expected = try title(name: name, runtime: runtime, deviceType: deviceType)
+        try await close { try match($0, name: name, title: expected, uniqueDevice: uniqueDevice) }
+    }
+
+    @MainActor static func closeDeleted(name: String) async throws {
+        try await close { try matchDeleted($0, name: name) }
+    }
+
+    @MainActor private static func close(matching match: ([Window]) throws -> [Window]) async throws {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Devices")
         let legacy = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
         guard legacy.isEmpty else { throw OrchardError.message("Legacy Simulator window mapping is unsupported; close the target window manually") }
@@ -142,7 +166,7 @@ enum DeviceWindowCloser {
             }
         }
         let before = try snapshot()
-        let targets = try match(before.map(\.0), name: name, title: expected, uniqueDevice: uniqueDevice)
+        let targets = try match(before.map(\.0))
         // Every target is checked before the first UI mutation.
         let closable = try targets.map { target in
             guard let element = before.first(where: { $0.0 == target })?.1 else {
@@ -170,7 +194,7 @@ enum DeviceWindowCloser {
         while true {
             let current = try snapshot().map(\.0)
             if !current.contains(where: targets.contains) {
-                guard try match(current, name: name, title: expected, uniqueDevice: uniqueDevice).isEmpty else {
+                guard try match(current).isEmpty else {
                     throw OrchardError.message("Device window reopened")
                 }
                 return

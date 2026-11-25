@@ -42,4 +42,14 @@ final class DeviceWindowCloserTests: XCTestCase {
         XCTAssertThrowsError(try DeviceWindowCloser.match([.init(identifier: "deviceWindow-AppWindow-1", title: "")], name: "branch", title: title, uniqueDevice: true))
         XCTAssertThrowsError(try DeviceWindowCloser.match([.init(identifier: "unknown-scene", title: "Device Hub")], name: "branch", title: title, uniqueDevice: true))
     }
+
+    func testDeletedDeviceMatchesEveryPlatformOfItsNameOnly() throws {
+        let iOS = DeviceWindowCloser.Window(identifier: "deviceWindow-AppWindow-1", title: "branch – iOS 27.2")
+        let iPadOS = DeviceWindowCloser.Window(identifier: "deviceWindow-AppWindow-2", title: "branch – iPadOS 27.2")
+        let other = DeviceWindowCloser.Window(identifier: "deviceWindow-AppWindow-3", title: "branch-two – iOS 27.2")
+        XCTAssertEqual(try DeviceWindowCloser.matchDeleted([iOS, iPadOS, other], name: "branch"), [iOS, iPadOS])
+        XCTAssertEqual(try DeviceWindowCloser.matchDeleted([other], name: "branch"), [])
+        XCTAssertThrowsError(try DeviceWindowCloser.matchDeleted([.init(identifier: "deviceWindow-AppWindow-4", title: "branch")], name: "branch"))
+        XCTAssertThrowsError(try DeviceWindowCloser.matchDeleted([iOS, .init(identifier: "mainWindow-AppWindow-1", title: "Devices")], name: "branch"))
+    }
 }

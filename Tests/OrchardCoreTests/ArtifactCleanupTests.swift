@@ -14,7 +14,8 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
     }
 
     func fixture(existing: Bool = true, realGit: Bool = false,
-                 closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in }) throws -> Fixture {
+                 closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in },
+                 closeDeletedWindows: @escaping @Sendable (String) async throws -> Void = { _ in }) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("Orchard Cleanup Tests-\(UUID().uuidString)").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -32,7 +33,7 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let worker = ArtifactCleanup(store: store, derivedData: root.appendingPathComponent("DerivedData"),
             devices: root.appendingPathComponent("Devices"),
             toolchain: AndroidToolchain(home: root, environment: [:]), now: { date },
-            closeWindow: closeWindow, command: { tool, args in
+            closeWindow: closeWindow, closeDeletedWindows: closeDeletedWindows, command: { tool, args in
                 if realGit && tool == "/usr/bin/git" {
                     return try await ProcessRunner.run(executableURL: URL(fileURLWithPath: tool),
                         arguments: args, currentDirectoryURL: nil)
@@ -168,6 +169,49 @@ final class ArtifactCleanupTests: XCTestCase, @unchecked Sendable {
         let report = await f.worker.run(apply: true, discover: false)
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "removed" })
         XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason.hasPrefix("window-left-open") })
+    }
+
+    func deletedRecord(_ f: Fixture, name: String = "feature-example") throws -> String {
+        let id = UUID().uuidString
+        try f.store.write(ArtifactSimulator(udid: id, name: name, owners: [f.owner], lastUsedAt: clock.timeIntervalSince1970),
+                          to: f.store.simulatorURL(id))
+        return id
+    }
+
+    func testDeviceDeletedOutsideOrchardHasWindowsClosedAndRecordForgotten() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(closeDeletedWindows: { await closed.add($0) })
+        let id = try deletedRecord(f)
+        let preview = await f.worker.run(apply: false, discover: false)
+        XCTAssertTrue(preview.actions.contains { $0.target == id && $0.outcome == "would-forget" })
+        var windows = await closed.items
+        XCTAssertEqual(windows, [])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.store.simulatorURL(id).path))
+
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason == "deleted-outside-orchard" && $0.outcome == "forgotten" })
+        windows = await closed.items
+        XCTAssertEqual(windows, ["feature-example"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.store.simulatorURL(id).path))
+    }
+
+    func testDeletedDeviceWindowsStayWhileSameNamedDeviceExists() async throws {
+        let closed = ClosedWindows()
+        let f = try fixture(closeDeletedWindows: { await closed.add($0) })
+        _ = try await simulator(f, state: "Booted")
+        let id = try deletedRecord(f)
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.outcome == "forgotten" })
+        let windows = await closed.items
+        XCTAssertEqual(windows, [])
+    }
+
+    func testDeletedDeviceRecordIsKeptWhenWindowCloseFails() async throws {
+        let f = try fixture(closeDeletedWindows: { _ in throw OrchardError.message("Window close requires Accessibility permission") })
+        let id = try deletedRecord(f)
+        let report = await f.worker.run(apply: true, discover: false)
+        XCTAssertTrue(report.actions.contains { $0.target == id && $0.reason.hasPrefix("window-left-open") })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.store.simulatorURL(id).path))
     }
 
     func testDeviceUseReceiptKeepsShutdownDeviceRecent() async throws {
