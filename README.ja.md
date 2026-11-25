@@ -11,7 +11,7 @@ git worktree ベースのワークフローを前提に設計されています�
 - **worktree の自動検出** — 自動登録したリポジトリと、任意で追加したディレクトリからworktree（`git worktree list`）を探索し、それぞれに最も近い `.xcworkspace` / `.xcodeproj` を見つけます。複数ブランチを切り替えなしで同時に動かせます。
 - **シミュレーターと実機** — 実行先はあいまいマッチで指定でき、空のbaseから複製したブランチ用Simulatorも使えます。
 - **実行(Run)管理** — `run --delegate` はすぐに戻り、バックグラウンドのプロセスがアプリのコンソールに接続し続けます。`runs` で状態を追い、`stop` で終了します。同じ実行先で新しい Run を開始すると前の Run が置き換わります(Xcode の Run ボタンと同じ挙動)。
-- **Xcode とビルドキャッシュを共有** — ビルドは標準の DerivedData を使う `xcodebuild` で実行されるため、Orchard と Xcode が互いのビルド成果物を再利用できます。
+- **Xcode とビルドキャッシュを共有** — ビルドは標準の DerivedData を使う `xcodebuild` で実行されるため、Orchard と Xcode が互いのビルド成果物を再利用できます（xcslot がある場合は[専用スロット](#xcslotによるビルドの高速化)を使います）。
 - **エージェント向けの出力** — あいまいマッチ、安定した終了コード、NDJSON 出力を備えています。
 
 ## 空のSimulator base
@@ -46,6 +46,12 @@ orchard run --branch feature/example --scheme MyScheme --branch-simulator --dele
 Scheme 一覧・ビルド・成果物確認で同じ依存フォルダを使います。同じプロジェクトへのコマンドは、プロセスをまたいで成果物確認まで順番に実行し、別 worktree の並列ビルドは維持します。標準の DerivedData のビルド先は変わりません。依存解決・ビルドが成功し、固定された Git checkout が未変更で、バイナリの参照先も複製内に収まる場合だけテンプレートを公開します。ローカル・Registry パッケージや未対応の lockfile 形式では通常の Xcode の動作を使います。clone が失敗した場合も通常の依存解決へ戻り、通常コピーによる容量消費は行いません。
 
 新しい worktree での容量増加を抑える機能です。既存の Build 成果物や Simulator データは削減しません。このSPM共有処理は既存の依存フォルダや worktree ごとの編集内容を削除しません。別のバックグラウンド整理処理は期限切れのDerivedDataを削除しますが、変更されたパッケージcheckoutは保護します。無効化する場合は `ORCHARD_SPM_CACHE=0` を設定して Orchard を実行してください。ビルド停止後に `templates/` 配下を削除すると不要なテンプレートを回収できます。`worktrees/` 配下には編集内容が残る可能性があるため、削除前に確認が必要です。
+
+## xcslotによるビルドの高速化
+
+`xcslot`がインストール済み（`brew install ertembiyik/tap/xcslot`）で、プロジェクトがgit worktree内にある場合、Orchardは自動的にxcslot経由でビルドします。xcslotはworktreeをリポジトリごとの少数の固定スロットへミラーし、スロットのDerivedDataを使い回します。そのため、新しいworktreeの初回ビルドも差分ビルドになり、DerivedDataがworktreeの数だけ増えることもなくなります。Orchardはビルド成果物のコピーからアプリをインストールします。コピーは`~/Library/Caches/Orchard/Products-v1/`配下にdestinationごとに1つ作り、7日間使われていない他のdestinationの分は削除します。ビルドそのものはスロット内のSwift Packageを使います。scheme一覧とビルド成果物の特定には、引き続き上記の共有パッケージディレクトリを使います。
+
+`ORCHARD_XCSLOT=0`を設定すると通常の`xcodebuild`でビルドし、`ORCHARD_XCSLOT=/path/to/xcslot`で使用するバイナリを指定できます。スロット数はxcslotの`~/.config/xcslot/config.json`で設定します。xcslot自体が失敗した場合は、黙ってxcslotなしで再ビルドせず、そのエラーを報告します。
 
 ## バックグラウンドでの整理
 

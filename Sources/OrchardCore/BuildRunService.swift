@@ -59,18 +59,45 @@ public final class BuildRunService: @unchecked Sendable {
             : nil
 
         progress("Preparing Swift packages")
-        let settings = try await SourcePackageCache().withCache(
+        let xcslot = await Self.xcslotBuilder(for: project)
+        let app = try await SourcePackageCache().withCache(
             project: project,
             checkCancellation: { try self.throwIfStopped() },
             log: commandLog
-        ) { packageArguments in
+        ) { packageArguments -> RunnableApp in
             try self.throwIfStopped()
+            progress("Building")
+            if let xcslot {
+                xcslot.pruneStaleProducts(keeping: destination)
+                let arguments = xcslot.arguments(project: project, scheme: scheme, destination: destination)
+                commandLog("$ xcslot \(arguments.joined(separator: " "))\n")
+                do {
+                    try await self.runStreamingCapturingFailure(
+                        executableURL: xcslot.executableURL,
+                        arguments: arguments,
+                        currentDirectoryURL: project.rootURL,
+                        log: commandLog
+                    )
+                } catch let failure as CommandFailure {
+                    throw failure.orchardError(prefix: "xcslot:")
+                }
+                try self.throwIfStopped()
+                progress("Resolving build product")
+                let settings = try await XcodeService().buildSettings(
+                    project: project, scheme: scheme, destination: destination,
+                    packageArguments: packageArguments
+                )
+                guard let app = settings.runnableApp(inProducts: xcslot.productsDirectory(for: destination)) else {
+                    throw Self.missingAppError
+                }
+                return app
+            }
+
             let buildArguments = project.xcodebuildArguments + packageArguments + [
                 "-scheme", scheme,
                 "-destination", destination.xcodebuildDestination,
                 "build"
             ]
-            progress("Building")
             commandLog("$ xcodebuild \(buildArguments.joined(separator: " "))\n")
             try await self.runStreaming(
                 executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
@@ -80,16 +107,17 @@ public final class BuildRunService: @unchecked Sendable {
             )
             try self.throwIfStopped()
             progress("Resolving build product")
-            return try await XcodeService().buildSettings(
+            let settings = try await XcodeService().buildSettings(
                 project: project, scheme: scheme, destination: destination,
                 packageArguments: packageArguments
             )
+            guard let app = settings.firstRunnableApp else {
+                throw Self.missingAppError
+            }
+            return app
         }
         try throwIfStopped()
 
-        guard let app = settings.firstRunnableApp else {
-            throw OrchardError.message("ビルド成果物の .app と bundle identifier を特定できませんでした。")
-        }
         launchedApp = app
 
         switch destination.kind {
@@ -115,6 +143,18 @@ public final class BuildRunService: @unchecked Sendable {
                 launched: launched
             )
         }
+    }
+
+    private static let missingAppError = OrchardError.message(
+        "ビルド成果物の .app と bundle identifier を特定できませんでした。"
+    )
+
+    private static func xcslotBuilder(for project: XcodeProject) async -> XcslotBuilder? {
+        guard let executableURL = XcslotBuilder.locate(),
+              await XcslotBuilder.isInsideGitWorkTree(project.rootURL) else {
+            return nil
+        }
+        return XcslotBuilder(executableURL: executableURL, productsRoot: XcslotBuilder.defaultProductsRoot)
     }
 
     /// Xcode 27 replaced Simulator.app with Device Hub, which opens a window
@@ -565,6 +605,14 @@ private struct CommandFailure: Error {
 
     var orchardError: OrchardError {
         OrchardError.message("Command failed with exit code \(exitCode).")
+    }
+
+    /// A wrapper's own setup failures (as opposed to the wrapped build failing)
+    /// are explained only by its prefixed lines, which quiet runs don't show.
+    func orchardError(prefix: String) -> OrchardError {
+        let lines = outputTail.split(separator: "\n").filter { $0.hasPrefix(prefix) }.suffix(3)
+        guard !lines.isEmpty else { return orchardError }
+        return OrchardError.message("Command failed with exit code \(exitCode).\n" + lines.joined(separator: "\n"))
     }
 }
 

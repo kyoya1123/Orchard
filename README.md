@@ -11,7 +11,7 @@ It is built with git worktree workflows in mind: use a project once and its repo
 - **Worktree discovery** — discovers registered repositories and optionally configured directories through `git worktree list`, then finds the nearest `.xcworkspace` / `.xcodeproj` for each. Run multiple branches side by side without switching anything.
 - **Simulators and devices** — fuzzy-matched destinations, plus per-branch Simulators cloned from an empty base.
 - **Run management** — `run --delegate` returns immediately while a background process keeps the app's console attached; `runs` follows any run and `stop` ends it. Starting a new run on a destination replaces the previous one — just like Xcode's Run button.
-- **Shares Xcode's build cache** — builds run through `xcodebuild` with the standard DerivedData location, so Orchard and Xcode reuse each other's build artifacts.
+- **Shares Xcode's build cache** — builds run through `xcodebuild` with the standard DerivedData location, so Orchard and Xcode reuse each other's build artifacts. (With [xcslot](#faster-builds-with-xcslot) installed, builds use its warm slots instead.)
 - **Agent-friendly output** — fuzzy matching, stable exit codes, and NDJSON output.
 
 ## Swift package disk usage
@@ -21,6 +21,12 @@ Orchard reuses the project's existing `DerivedData/SourcePackages` when present.
 Scheme listing, builds and build-product lookup use the same package directory. Commands for the same project are serialized across processes until build-product lookup finishes; different worktrees can still build concurrently. The normal DerivedData build location remains unchanged. A successful resolution/build publishes a template only when the pinned Git checkouts are clean and artifact paths are self-contained. Local/registry packages and unsupported lockfile formats use normal Xcode behavior. Failed clones fall back to Xcode resolution, never a full copy.
 
 This reduces growth from new worktrees; it does not shrink existing Build products or Simulator data. The SPM sharing service does not delete per-worktree checkouts while building. Managed caches record their owner and pinned dependency revisions. The separate collector below can reclaim a cache only after its recorded worktree disappears and its pinned checkouts remain unchanged. Legacy entries without a receipt, live-worktree caches, templates and manual dependency edits remain protected. To opt out, run Orchard with `ORCHARD_SPM_CACHE=0`. After stopping builds, immutable `templates/` subdirectories can be removed to reclaim unused snapshots; private `worktrees/` directories may contain edits and require manual review before removal.
+
+## Faster builds with xcslot
+
+If `xcslot` is installed (`brew install ertembiyik/tap/xcslot`) and the project is in a git work tree, Orchard builds through it automatically. xcslot mirrors the worktree into a small, fixed set of per-repository slots whose DerivedData stays warm, so the first build of a new worktree is incremental and DerivedData stops growing per worktree. Orchard then installs the app from a copy of the build products kept under `~/Library/Caches/Orchard/Products-v1/` (one directory per destination; directories of other destinations unused for seven days are removed). The build itself uses the slot's own Swift package checkouts; the shared package directory above is still used for scheme listing and build-product lookup.
+
+Set `ORCHARD_XCSLOT=0` to build with plain `xcodebuild`, or `ORCHARD_XCSLOT=/path/to/xcslot` to pick a specific binary. The number of slots is configured in xcslot's `~/.config/xcslot/config.json`. If xcslot itself fails, Orchard reports its error instead of silently rebuilding without it.
 
 ## Empty Simulator bases
 

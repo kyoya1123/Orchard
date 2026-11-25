@@ -83,6 +83,37 @@ public struct XcodeBuildSettings: Sendable {
     }
 
     public var firstRunnableApp: RunnableApp? {
+        runnableEntry().map { entry in
+            RunnableApp(
+                appURL: URL(fileURLWithPath: entry.targetBuildDirectory).appendingPathComponent(entry.wrapperName),
+                bundleIdentifier: entry.bundleIdentifier
+            )
+        }
+    }
+
+    /// The app `firstRunnableApp` chose, relocated from `BUILD_DIR` into a
+    /// copy of the build's `Build/Products` directory.
+    public func runnableApp(inProducts products: URL) -> RunnableApp? {
+        guard let entry = runnableEntry(),
+              let buildDirectory = entry.entry["BUILD_DIR"], !buildDirectory.isEmpty else {
+            return nil
+        }
+        let build = URL(fileURLWithPath: buildDirectory).standardizedFileURL.pathComponents
+        let target = URL(fileURLWithPath: entry.targetBuildDirectory).standardizedFileURL.pathComponents
+        guard target.count >= build.count, Array(target.prefix(build.count)) == build else {
+            return nil
+        }
+        let directory = target.dropFirst(build.count)
+            .reduce(products) { $0.appendingPathComponent($1, isDirectory: true) }
+        return RunnableApp(
+            appURL: directory.appendingPathComponent(entry.wrapperName),
+            bundleIdentifier: entry.bundleIdentifier
+        )
+    }
+
+    private func runnableEntry() -> (
+        entry: [String: String], targetBuildDirectory: String, wrapperName: String, bundleIdentifier: String
+    )? {
         for entry in entries {
             guard let targetBuildDirectory = entry["TARGET_BUILD_DIR"],
                   let wrapperName = entry["WRAPPER_NAME"],
@@ -91,13 +122,8 @@ public struct XcodeBuildSettings: Sendable {
                   !bundleIdentifier.isEmpty else {
                 continue
             }
-
-            return RunnableApp(
-                appURL: URL(fileURLWithPath: targetBuildDirectory).appendingPathComponent(wrapperName),
-                bundleIdentifier: bundleIdentifier
-            )
+            return (entry, targetBuildDirectory, wrapperName, bundleIdentifier)
         }
-
         return nil
     }
 }
