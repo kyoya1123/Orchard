@@ -30,6 +30,7 @@ public struct ArtifactCleanup: Sendable {
     let command: Command
     let now: @Sendable () -> Date
     let closeWindow: @Sendable (String, String, String?, Bool) async throws -> Void
+    let closeDeletedWindows: @Sendable (String) async throws -> Void
     let windowAccess: (@Sendable () async -> CleanupReport.Action?)?
     let runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)?
     static let retention: TimeInterval = 7 * 86400
@@ -43,6 +44,7 @@ public struct ArtifactCleanup: Sendable {
                   sourcePackages: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Orchard/SourcePackages-v1"),
                   runtimeMaintenance: { await SimulatorBaseService().maintain() },
                   closeWindow: { try await DeviceWindowCloser.close(name: $0, runtime: $1, deviceType: $2, uniqueDevice: $3) },
+                  closeDeletedWindows: { try await DeviceWindowCloser.closeDeleted(name: $0) },
                   windowAccess: { DeviceWindowCloser.accessReport() })
     }
 
@@ -51,6 +53,7 @@ public struct ArtifactCleanup: Sendable {
          now: @escaping @Sendable () -> Date = { Date() },
          runtimeMaintenance: (@Sendable () async -> CleanupReport.Action?)? = nil,
          closeWindow: @escaping @Sendable (String, String, String?, Bool) async throws -> Void = { _, _, _, _ in },
+         closeDeletedWindows: @escaping @Sendable (String) async throws -> Void = { _ in },
          windowAccess: (@Sendable () async -> CleanupReport.Action?)? = nil,
          command: @escaping Command = { executable, arguments in
              // CoreSimulator, ADB and avdmanager IPC can stall indefinitely at
@@ -67,6 +70,7 @@ public struct ArtifactCleanup: Sendable {
         self.now = now
         self.command = command
         self.closeWindow = closeWindow
+        self.closeDeletedWindows = closeDeletedWindows
         self.windowAccess = windowAccess
         self.runtimeMaintenance = runtimeMaintenance
     }
@@ -482,6 +486,31 @@ public struct ArtifactCleanup: Sendable {
         }
     }
 
+    /// A device deleted outside Orchard (a direct `simctl delete`) never went
+    /// through the removal path, so its Device Hub window and record remain.
+    private func forgetDeleted(_ entry: ArtifactSimulator, apply: Bool, report: inout CleanupReport) async {
+        func action(_ reason: String, _ outcome: String) -> CleanupReport.Action {
+            .init(target: entry.udid, reason: reason, outcome: outcome, name: entry.name)
+        }
+        guard apply else { report.actions.append(action("deleted-outside-orchard", "would-forget")); return }
+        do {
+            guard let lease = try ArtifactLease.tryAcquire(store.simulatorLock(entry.udid)) else { return }
+            defer { lease.close() }
+            guard let record = try store.read(ArtifactSimulator.self, at: store.simulatorURL(entry.udid)),
+                  record.name == entry.name else { return }
+            let devices = try await deviceList()
+            guard !devices.contains(where: { $0.udid == record.udid }) else { return }
+            // A live device of the same name may own any of those windows.
+            if !devices.contains(where: { $0.name == record.name }) {
+                try await closeDeletedWindows(record.name)
+            }
+            try FileManager.default.removeItem(at: store.simulatorURL(record.udid))
+            report.actions.append(action("deleted-outside-orchard", "forgotten"))
+        } catch {
+            report.actions.append(action("window-left-open: \(error)", "skipped"))
+        }
+    }
+
     private func cleanSimulators(settings: Settings, apply: Bool, report: inout CleanupReport) async throws {
         let records = try store.all(ArtifactSimulator.self, in: "simulators")
         guard !records.isEmpty else { return }
@@ -501,8 +530,11 @@ public struct ArtifactCleanup: Sendable {
             }
             do {
                 guard UUID(uuidString: entry.udid) != nil, !ArtifactStore.isStandardSimulator(entry.name),
-                      !entry.owners.contains(where: { excluded($0, settings: settings) }),
-                      let initial = inventory.first(where: { $0.udid == entry.udid }), initial.name == entry.name else { continue }
+                      !entry.owners.contains(where: { excluded($0, settings: settings) }) else { continue }
+                guard let initial = inventory.first(where: { $0.udid == entry.udid }) else {
+                    await forgetDeleted(entry, apply: apply, report: &report); continue
+                }
+                guard initial.name == entry.name else { continue }
                 current = initial
                 let orphanedBoot = initial.state == "Booted" ? try ownersMissing(entry) : false
                 let switchedBoot = initial.state == "Booted" && !orphanedBoot ? await branchSwitched(entry) : false
