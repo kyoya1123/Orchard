@@ -69,7 +69,8 @@ final class SourcePackageCacheTests: XCTestCase, @unchecked Sendable {
     }
 
     func testOrphanPackageCleanupRequiresUnmodifiedPinsAndPreservesTemplates() async throws {
-        for variant in ["clean", "dirty", "local-commit", "extra-file", "extra-checkout", "busy", "live"] {
+        for variant in ["clean", "empty-ignored-dir", "ignored-file", "dirty", "local-commit", "extra-file", "extra-checkout", "busy", "live"] {
+            let removable = ["clean", "empty-ignored-dir"].contains(variant)
             let root = try temporaryDirectory()
             let owner = ArtifactOwner(projectPath: root.appendingPathComponent("worktree/App.xcodeproj").path,
                                       worktreePath: root.appendingPathComponent("worktree").path, repositoryPath: root.path)
@@ -86,6 +87,11 @@ final class SourcePackageCacheTests: XCTestCase, @unchecked Sendable {
             let checkout = fixture.packages.appendingPathComponent("checkouts/package")
             var lease: ArtifactLease?
             switch variant {
+            case "empty-ignored-dir", "ignored-file":
+                try write(".swiftpm/\n", at: checkout.appendingPathComponent(".git/info/exclude"))
+                let ignored = checkout.appendingPathComponent(".swiftpm/xcode")
+                try FileManager.default.createDirectory(at: ignored, withIntermediateDirectories: true)
+                if variant == "ignored-file" { try write("data", at: ignored.appendingPathComponent("a")) }
             case "dirty", "local-commit":
                 try write("manual edit", at: checkout.appendingPathComponent("Source.swift"))
                 if variant == "local-commit" {
@@ -111,14 +117,80 @@ final class SourcePackageCacheTests: XCTestCase, @unchecked Sendable {
             })
             let preview = await worker.run(apply: false, discover: false, scope: .sourcePackages)
             XCTAssertNil(preview.error, variant)
-            XCTAssertEqual(preview.actions.first?.outcome, variant == "clean" ? "would-remove" : "preserved", "\(variant): \(preview.actions.map(\.reason))")
+            XCTAssertEqual(preview.actions.first?.outcome, removable ? "would-remove" : "preserved", "\(variant): \(preview.actions.map(\.reason))")
             XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
             let result = await worker.run(apply: true, discover: false, scope: .sourcePackages)
             XCTAssertNil(result.error, variant)
-            XCTAssertEqual(result.actions.first?.outcome, variant == "clean" ? "removed" : "preserved", "\(variant): \(result.actions.map(\.reason))")
-            XCTAssertEqual(FileManager.default.fileExists(atPath: directory.path), variant != "clean", variant)
+            XCTAssertEqual(result.actions.first?.outcome, removable ? "removed" : "preserved", "\(variant): \(result.actions.map(\.reason))")
+            XCTAssertEqual(FileManager.default.fileExists(atPath: directory.path), !removable, variant)
             XCTAssertTrue(FileManager.default.fileExists(atPath: template.path), variant)
         }
+    }
+
+    private func templateCleanupWorker(root: URL, now: Date = Date()) -> ArtifactCleanup {
+        ArtifactCleanup(store: ArtifactStore(root: root.appendingPathComponent("state")),
+                        derivedData: root.appendingPathComponent("DD"), devices: root.appendingPathComponent("Devices"),
+                        sourcePackages: root.appendingPathComponent("packages"), now: { now },
+                        command: { _, _ in throw OrchardError.message("Unexpected cleanup command") })
+    }
+
+    private func makeTemplate(_ repository: URL, name: String, age: TimeInterval) throws -> URL {
+        let template = repository.appendingPathComponent("templates/\(name)")
+        try write("data", at: template.appendingPathComponent("file"))
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: template.path)
+        return template
+    }
+
+    func testStaleTemplatesAreRemovedAndFreshOnesKept() async throws {
+        let root = try temporaryDirectory()
+        let repository = root.appendingPathComponent("packages/repo")
+        let stale = try makeTemplate(repository, name: String(repeating: "a", count: 64), age: 31 * 86400)
+        let fresh = try makeTemplate(repository, name: String(repeating: "b", count: 64), age: 86400)
+        let worker = templateCleanupWorker(root: root)
+        let preview = await worker.run(apply: false, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(preview.actions.map(\.reason), ["stale-package-template"])
+        XCTAssertEqual(preview.actions.map(\.outcome), ["would-remove"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path))
+        let result = await worker.run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(result.actions.map(\.outcome), ["removed"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.path))
+    }
+
+    func testRepositoryCacheWithOnlyStaleTemplatesIsRemovedOnApply() async throws {
+        let root = try temporaryDirectory()
+        let repository = root.appendingPathComponent("packages/repo")
+        _ = try makeTemplate(repository, name: String(repeating: "a", count: 64), age: 40 * 86400)
+        try write("", at: repository.appendingPathComponent("locks/x.lock"))
+        let worker = templateCleanupWorker(root: root)
+        _ = await worker.run(apply: false, discover: false, scope: .sourcePackages)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.path))
+        let result = await worker.run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(result.actions.map(\.reason), ["stale-package-template", "empty-package-repository"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.path))
+    }
+
+    func testRepositoryCacheWithUnknownContentIsKept() async throws {
+        let root = try temporaryDirectory()
+        let repository = root.appendingPathComponent("packages/repo")
+        _ = try makeTemplate(repository, name: String(repeating: "a", count: 64), age: 40 * 86400)
+        try write("keep", at: repository.appendingPathComponent("notes.txt"))
+        let result = await templateCleanupWorker(root: root).run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(result.actions.map(\.reason), ["stale-package-template"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.appendingPathComponent("notes.txt").path))
+    }
+
+    func testBusyTemplateLockPreservesTemplates() async throws {
+        let root = try temporaryDirectory()
+        let repository = root.appendingPathComponent("packages/repo")
+        let stale = try makeTemplate(repository, name: String(repeating: "a", count: 64), age: 40 * 86400)
+        let lease = try XCTUnwrap(try ArtifactLease.tryAcquire(repository.appendingPathComponent("templates.lock")))
+        defer { lease.close() }
+        let result = await templateCleanupWorker(root: root).run(apply: true, discover: false, scope: .sourcePackages)
+        XCTAssertEqual(result.actions.map(\.reason), ["active-package-cache"])
+        XCTAssertEqual(result.actions.map(\.outcome), ["preserved"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path))
     }
 
     func testKeyChangesWithPinsAndToolchain() {

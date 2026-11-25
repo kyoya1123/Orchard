@@ -433,7 +433,7 @@ public struct SourcePackageCache: Sendable {
             let status = try await ProcessRunner.run(
                 executableURL: URL(fileURLWithPath: "/usr/bin/git"),
                 arguments: ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain",
-                            "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"],
+                            "--untracked-files=all", "--ignored=traditional", "--ignore-submodules=none"],
                 currentDirectoryURL: directory
             )
             guard head == pin.revision, status.isEmpty else { throw OrchardError.message("SPM checkout is modified: \(identity)") }
