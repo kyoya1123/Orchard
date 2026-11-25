@@ -78,6 +78,8 @@ final class CleanupInvocationTests: XCTestCase, @unchecked Sendable {
         await invocation.drain {
             if await passes.next() == 1 {
                 do { try await invocation.enqueue() } catch { XCTFail("\(error)") }
+                // BackgroundCleanup skips the spawn when this probe fails.
+                do { XCTAssertNil(try ArtifactLease.tryAcquire(invocation.workerLock)) } catch { XCTFail("\(error)") }
                 await invocation.drain { XCTFail("A second worker must not collect concurrently"); return CleanupReport() }
             }
             return CleanupReport()
