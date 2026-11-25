@@ -25,7 +25,7 @@ struct SimulatorOptions: ParsableArguments {
         let result = try await SimulatorBaseService().prepare(
             name: name, selection: .init(deviceType: deviceType, runtime: runtime), project: project,
             progress: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
-        await BackgroundCleanup.launch()
+        BackgroundCleanup.launch()
         if json {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

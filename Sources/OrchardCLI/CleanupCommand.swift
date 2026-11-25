@@ -38,13 +38,14 @@ struct CleanupWorker: AsyncParsableCommand {
     mutating func run() async throws {
         signal(SIGHUP, SIG_IGN)
         _ = setsid()
-        _ = setpriority(PRIO_PROCESS, 0, 20)
-        // Task QoS keeps our filesystem work in the background. A process-wide
-        // I/O throttle would also trap utility-QoS simctl/ADB/avdmanager children
-        // and make their bounded IPC/deletion commands time out.
+        // Not background QoS or nice: the worker holds exclusive project/device
+        // locks, and a worker starved under load holds them indefinitely.
+        // A process-wide I/O throttle would also trap utility-QoS
+        // simctl/ADB/avdmanager children and make their bounded IPC/deletion
+        // commands time out.
         let paths = DirectoryOptions.directoryURLs(explicit: [])
         let devicesOnly = devicesOnly
-        _ = await Task.detached(priority: .background) {
+        _ = await Task.detached(priority: .utility) {
             if devicesOnly {
                 await CleanupInvocation().drain(directories: paths)
             } else {

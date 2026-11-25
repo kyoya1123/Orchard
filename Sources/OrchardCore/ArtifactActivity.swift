@@ -177,36 +177,40 @@ public final class ArtifactActivity: @unchecked Sendable {
 
 public enum BackgroundCleanup {
     public static func schedule() {
-        Task.detached(priority: .background) { await launch() }
+        launch()
     }
 
     /// Every command invocation checks devices whose owners disappeared. It
     /// uses recorded ownership only, so it never rescans repositories.
     public static func request() async {
-        guard (try? await CleanupInvocation().enqueue()) != nil else { return }
-        await launch(arguments: ["cleanup-worker", "--devices-only"])
+        let invocation = CleanupInvocation()
+        guard (try? await invocation.enqueue()) != nil else { return }
+        // Probed after enqueue: a draining worker rereads the pending request
+        // before releasing its lock, so skipping the spawn cannot lose it.
+        launch(arguments: ["cleanup-worker", "--devices-only"], unlessHeld: invocation.workerLock)
     }
 
-    public static func launch() async {
-        await launch(arguments: ["cleanup-worker"])
+    public static func launch() {
+        launch(arguments: ["cleanup-worker"], unlessHeld: ArtifactStore().root.appendingPathComponent("cleanup.lock"))
     }
 
-    private static func launch(arguments: [String]) async {
+    /// Spawns on the caller's thread: every command waits on this, and a
+    /// background-QoS thread can wait seconds for CPU under load.
+    private static func launch(arguments: [String], unlessHeld lock: URL) {
         guard ProcessInfo.processInfo.environment["ORCHARD_DISABLE_BACKGROUND_CLEANUP"] != "1" else { return }
         guard let executable = Bundle.main.executableURL, executable.lastPathComponent == "orchard" else { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        DispatchQueue.global(qos: .background).async {
-            defer { continuation.resume() }
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = arguments
-            process.qualityOfService = .background
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { _ in }
-            try? process.run()
-        }
-        }
+        // A spawned duplicate would only exit at its own try-lock, and under
+        // load it waits for CPU first, so duplicates pile up.
+        guard let probe = try? ArtifactLease.tryAcquire(lock) else { return }
+        probe.close()
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.qualityOfService = .utility
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { _ in }
+        try? process.run()
     }
 }
